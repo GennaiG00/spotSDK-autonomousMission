@@ -12,14 +12,15 @@ import bosdyn.geometry
 from bosdyn.api.basic_command_pb2 import SE2TrajectoryCommand
 from bosdyn.api.graph_nav import graph_nav_pb2
 from bosdyn.client import Robot
-from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME, get_a_tform_b
-from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
+from bosdyn.client.frame_helpers import (BODY_FRAME_NAME, ODOM_FRAME_NAME, VISION_FRAME_NAME,get_se2_a_tform_b)
+from bosdyn.client.robot_command import (RobotCommandBuilder, RobotCommandClient, blocking_stand)
+from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.api.basic_command_pb2 import RobotCommandFeedbackStatus
 from bosdyn.api.spot.robot_command_pb2 import MobilityParams
 from bosdyn.client.recording import GraphNavRecordingServiceClient
 from bosdyn.client.graph_nav import GraphNavClient
 from bosdyn.client.map_processing import MapProcessingServiceClient
-from bosdyn.geometry import EulerZXY
-from bosdyn.client.robot_command import RobotCommandBuilder
+from bosdyn.client import math_helpers
 
 class RecordingInterface(object):
     def __init__(self, robot, download_filepath, client_metadata):
@@ -171,13 +172,54 @@ class RecordingInterface(object):
 
     def navigate_to(self):
         graph = self._graph_nav_client.download_graph()
-        destination_waypoint = graph.waypoints[0]
+        first_waypoint = None
+        for waypoint in graph.waypoints:
+            if waypoint.annotations.name == "waypoint_0":
+                first_waypoint = waypoint
+        if first_waypoint is None:
+            print('No waypoint_0 found in the graph.')
+            return
+
         nav_to_cmd_id = None
         is_finished = False
         while not is_finished:
-            nav_to_cmd_id = self._graph_nav_client.navigate_to(destination_waypoint.id, 1, command_id=nav_to_cmd_id)
+            nav_to_cmd_id = self._graph_nav_client.navigate_to(first_waypoint.id, 1, command_id=nav_to_cmd_id)
             time.sleep(.5)  # Sleep for half a second to allow for command execution.
             is_finished = self._check_success(nav_to_cmd_id)
+
+def relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_state_client, stairs=False):
+    transforms = robot_state_client.get_robot_state().kinematic_state.transforms_snapshot
+
+    # Build the transform for where we want the robot to be relative to where the body currently is.
+    body_tform_goal = math_helpers.SE2Pose(x=dx, y=dy, angle=dyaw)
+    # We do not want to commanhis goal in body frame because the body will move, thus shifting
+    # our goal. Instead, we transform this offset to get the goal position in the output frame
+    # (which will be either odom or vision).
+    out_tform_body = get_se2_a_tform_b(transforms, frame_name, BODY_FRAME_NAME)
+    out_tform_goal = out_tform_body * body_tform_goal
+    # Command the robot to go to the goal point in the specified frame. The command will stop at the
+    # new position.
+    robot_cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
+        goal_x=out_tform_goal.x, goal_y=out_tform_goal.y, goal_heading=out_tform_goal.angle,
+        frame_name=frame_name, params=RobotCommandBuilder.mobility_params(stair_hint=stairs))
+    end_time = 10.0
+    cmd_id = robot_command_client.robot_command(lease=None, command=robot_cmd,
+                                                end_time_secs=time.time() + end_time)
+    # Wait until the robot has reached the goal.
+    while True:
+        feedback = robot_command_client.robot_command_feedback(cmd_id)
+        mobility_feedback = feedback.feedback.synchronized_feedback.mobility_command_feedback
+        if mobility_feedback.status != RobotCommandFeedbackStatus.STATUS_PROCESSING:
+            print('Failed to reach the goal')
+            return False
+        traj_feedback = mobility_feedback.se2_trajectory_feedback
+        if (traj_feedback.status == traj_feedback.STATUS_AT_GOAL and
+                traj_feedback.body_movement_status == traj_feedback.BODY_STATUS_SETTLED):
+            print('Arrived at the goal.')
+            return True
+        time.sleep(1)
+
+    return True
 
 
 def easy_walk(options):
@@ -209,92 +251,27 @@ def easy_walk(options):
     recordingInterface.stop_recording()
     recordingInterface.clear_map()
     with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
-
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+        state_client = robot.ensure_client(RobotStateClient.default_service_name)
+        robot.time_sync.wait_for_sync()
         robot.logger.info('Powering on robot... This may take several seconds.')
-        robot.power_on(timeout_sec=20)
+        robot.power_on()
         assert robot.is_powered_on(), 'Robot power on failed.'
         robot.logger.info('Robot powered on.')
-
-
+        blocking_stand(command_client)
         recordingInterface.start_recording()
+        relative_move(8, 0, 0, "odom", robot_command_client=command_client, robot_state_client=state_client)
+        relative_move(0, 0, math.radians(-90), "odom", command_client, state_client)
+        relative_move(1, 0, 0, "odom", command_client, state_client)
+        relative_move(0, 0, math.radians(-90), "odom", command_client, state_client)
+        relative_move(1, 0, 0, "odom", command_client, state_client)
+        relative_move(0, 0, math.radians(-90), "odom", command_client, state_client)
+        relative_move(1, 0, 0, "odom", command_client, state_client)
+        relative_move(0, 0, math.radians(90), "odom", command_client, state_client)
+        #relative_move(8, 0, 0, "odom", command_client, state_client)
+        #relative_move(0, 0, math.radians(-360), "body", command_client, state_client)
 
-        mobilityParams = MobilityParams()
-        mobilityParams.vel_limit.max_vel.linear.x = 1.0
-        mobilityParams.vel_limit.max_vel.linear.y = 0.5
-        #mobilityParams.vel_limit.min_vel.angular = 0.5
-        #mobilityParams.vel_limit.max_vel.angular = 1
-        #mobilityParams.vel_limit.min_vel.angular = 1
-        #mobilityParams.obstacle_params.obstacle_avoidance_padding = 0.1
-        #mobilityParams.obstacle_params.disable_vision_foot_obstacle_avoidance = False
-        #mobilityParams.obstacle_params.disable_vision_foot_obstacle_body_assist = False
-        breakpoint()
-        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
 
-        command_client.robot_command(
-            RobotCommandBuilder.synchro_trajectory_command_in_body_frame(0, 0, 3.14, robot.get_frame_tree_snapshot(),
-                                                                         params=mobilityParams),
-            end_time_secs=time.time() + 3)
-        time.sleep(10)
-        command_client.robot_command(
-            RobotCommandBuilder.synchro_trajectory_command_in_body_frame(5, 0, 0, robot.get_frame_tree_snapshot(),
-                                                                         params=mobilityParams),
-            end_time_secs=time.time() + 10)
-        time.sleep(5)
-        command_client.robot_command(
-            RobotCommandBuilder.synchro_trajectory_command_in_body_frame(0, 0, 1.5, robot.get_frame_tree_snapshot(),
-                                                                         params=mobilityParams),
-            end_time_secs=time.time() + 10)
-        time.sleep(5)
-        command_client.robot_command(
-            RobotCommandBuilder.synchro_trajectory_command_in_body_frame(1, 0, 0, robot.get_frame_tree_snapshot(),
-                                                                         params=mobilityParams),
-            end_time_secs=time.time() + 10)
-        robot.logger.info('Robot standing.')
-        time.sleep(5)
-
-        #tCommandBodyMov = {2}
-        #bosdyn.client.robot_command.block_for_trajectory_cmd(command_client, id2,
-                                                             # trajectory_end_statuses=tCommandStatus,
-                                                             # body_movement_statuses=tCommandBodyMov, timeout_sec=30,
-                                                             # logger=robot.logger)
-        # command_client.robot_command(
-        #     RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
-        #         21, 0, 0, robot.get_frame_tree_snapshot(), params=mobilityParams
-        #     ),
-        #     end_time_secs=time.time() + 20,
-        # )
-        #tCommandBodyMov = {2}
-        # bosdyn.client.robot_command.block_for_trajectory_cmd(command_client, id2,
-        #                                                      trajectory_end_statuses=tCommandStatus,
-        #                                                      body_movement_statuses=tCommandBodyMov, timeout_sec=30,
-        #                                                      logger=robot.logger)
-        # sleep(5)
-        #
-        # id2 = command_client.robot_command(
-        #     RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
-        #         0, 0, -(3.14 / 2), robot.get_frame_tree_snapshot(), params=mobilityParams
-        #     ),
-        #     end_time_secs=time.time() + 20,
-        #)
-        # tCommandBodyMov = {2}
-        # bosdyn.client.robot_command.block_for_trajectory_cmd(command_client, id2,
-        #                                                      trajectory_end_statuses=tCommandStatus,
-        #                                                      body_movement_statuses=tCommandBodyMov, timeout_sec=30,
-        #                                                      logger=robot.logger)
-        # sleep(5)
-        #
-        # id2 = command_client.robot_command(
-        #     RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
-        #         12, 0, 0, robot.get_frame_tree_snapshot(), params=mobilityParams
-        #     ),
-        #     end_time_secs=time.time() + 20,
-        # )
-        # tCommandBodyMov = {2}
-        # bosdyn.client.robot_command.block_for_trajectory_cmd(command_client, id2,
-        #                                                      trajectory_end_statuses=tCommandStatus,
-        #                                                      body_movement_statuses=tCommandBodyMov, timeout_sec=30,
-        #                                                      logger=robot.logger)
-        #sleep(5)
 
         robot.logger.info('Robot safely powered off.')
         log_comment = 'Easy autowalk.'
@@ -304,9 +281,9 @@ def easy_walk(options):
         recordingInterface.navigate_to()
         command_client.robot_command(RobotCommandBuilder.synchro_sit_command(), end_time_secs=time.time() + 20)
         sleep(1)
-        robot.power_off(cut_immediately=False, timeout_sec=30)
-        assert not robot.is_powered_on(), 'Robot power off failed.'
-        robot.logger.info('Robot safely powered off.')
+        #robot.power_off(cut_immediately=False, timeout_sec=30)
+        #assert not robot.is_powered_on(), 'Robot power off failed.'
+        #robot.logger.info('Robot safely powered off.')
         recordingInterface.download_full_graph()
 
 
