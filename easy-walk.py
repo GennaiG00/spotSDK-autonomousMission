@@ -202,7 +202,7 @@ def relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_state_cl
     robot_cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
         goal_x=out_tform_goal.x, goal_y=out_tform_goal.y, goal_heading=out_tform_goal.angle,
         frame_name=frame_name, params=RobotCommandBuilder.mobility_params(stair_hint=stairs))
-    end_time = 10.0
+    end_time = 6000.0
     cmd_id = robot_command_client.robot_command(lease=None, command=robot_cmd,
                                                 end_time_secs=time.time() + end_time)
     # Wait until the robot has reached the goal.
@@ -260,16 +260,17 @@ def easy_walk(options):
         robot.logger.info('Robot powered on.')
         blocking_stand(command_client)
         recordingInterface.start_recording()
-        relative_move(8, 0, 0, "odom", robot_command_client=command_client, robot_state_client=state_client)
-        relative_move(0, 0, math.radians(-90), "odom", command_client, state_client)
-        relative_move(1, 0, 0, "odom", command_client, state_client)
-        relative_move(0, 0, math.radians(-90), "odom", command_client, state_client)
-        relative_move(1, 0, 0, "odom", command_client, state_client)
-        relative_move(0, 0, math.radians(-90), "odom", command_client, state_client)
-        relative_move(1, 0, 0, "odom", command_client, state_client)
-        relative_move(0, 0, math.radians(90), "odom", command_client, state_client)
-        #relative_move(8, 0, 0, "odom", command_client, state_client)
-        #relative_move(0, 0, math.radians(-360), "body", command_client, state_client)
+        relative_move(3.5, 0, 0, "vision", robot_command_client=command_client, robot_state_client=state_client)
+        relative_move(0, 0, math.radians(90), "vision", command_client, state_client)
+        relative_move(17, 0, 0, "vision", command_client, state_client)
+        robot.logger.info('21')
+        relative_move(0, 0, math.radians(-90), "vision", command_client, state_client)
+        relative_move(10, 0, 0, "vision", command_client, state_client)
+        # relative_move(0, 0, math.radians(-90), "odom", command_client, state_client)
+        # relative_move(1, 0, 0, "odom", command_client, state_client)
+        # relative_move(0, 0, math.radians(90), "odom", command_client, state_client)
+        # relative_move(8, 0, 0, "odom", command_client, state_client)
+        # relative_move(0, 0, math.radians(-360), "body", command_client, state_client)
 
 
 
