@@ -26,24 +26,16 @@ from types import SimpleNamespace
 from bosdyn.client.recording import GraphNavRecordingServiceClient
 from bosdyn.client.math_helpers import Quat, SE3Pose
 from google.protobuf import wrappers_pb2 as wrappers
-from matplotlib import pyplot as plt
 
 
 #---------------- OBSTACLE GRID START -----------------------
 
 def create_vtk_no_step_grid(proto, robot_state_client):
     """Generate VTK polydata for the no step grid from the local grid response."""
-    local_grid_proto = None
-    cell_size = 0.0
     for local_grid_found in proto:
         if local_grid_found.local_grid_type_name == 'no_step':
             local_grid_proto = local_grid_found
             cell_size = local_grid_found.local_grid.extent.cell_size
-
-    # If no relevant local grid found, return empty arrays (caller can handle)
-    if local_grid_proto is None:
-        return np.empty((0, 3), dtype=np.float32), np.array([], dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
-
     # Unpack the data field for the local grid.
     cells_no_step = unpack_grid(local_grid_proto).astype(np.float32)
     # Populate the x,y values with a complete combination of all possible pairs for the dimensions in the grid extent.
@@ -142,9 +134,8 @@ def expand_data_by_rle_count(local_grid_proto, data_type=np.int16):
     return np.array(cells_pz_full)
 
 def analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
-                            front_distance=0.5, lateral_distance=1.5, lateral_width=1.0,
-                            rear_distance=1.0):
-    """    Analyze zones in front, to the right, to the left and behind the robot to determine whether the path is clear.
+                            front_distance=0.5, lateral_distance=1.5, lateral_width=1.0):
+    """    Analyze zones in front, to the right and to the left of the robot to determine whether the path is clear.
 
     Args:
         pts: array (N, 3) with coordinates [x, y, z] of the cells in the VISION frame
@@ -154,18 +145,15 @@ def analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
         front_distance: how far to look ahead (meters)
         lateral_distance: how far to look sideways (meters)
         lateral_width: width of the lateral area to consider (meters)
-        rear_distance: how far to look behind (meters)
 
     Returns:
         dict with keys:
             - 'front_blocked': bool, True if front is blocked
             - 'left_free': bool, True if left side is free
             - 'right_free': bool, True if right side is free
-            - 'rear_free': bool, True if rear side is free
             - 'front_free_ratio': float 0-1, fraction of free cells in front
             - 'left_free_ratio': float 0-1, fraction of free cells on the left
             - 'right_free_ratio': float 0-1, fraction of free cells on the right
-            - 'rear_free_ratio': float 0-1, fraction of free cells on the rear
             - 'recommendation': str, suggestion ('GO_STRAIGHT', 'TURN_LEFT', 'TURN_RIGHT', 'BLOCKED')
     """
 
@@ -203,9 +191,9 @@ def analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
     front_blocked = front_free_ratio < 0.7
 
     # --- LEFT ZONE ---
-    # Cells to the left of the robot (full side, not just front-left)
-    mask_left = (proj_lateral < 0) & (proj_lateral >= -lateral_width) & \
-                (np.abs(proj_front) <= lateral_distance)
+    # Cells to the left: proj_lateral < 0 (left), proj_front between 0 and lateral_distance, |proj_lateral| < lateral_width
+    mask_left = (proj_front > 0) & (proj_front <= lateral_distance) & \
+                (proj_lateral < 0) & (proj_lateral >= -lateral_width)
     cells_left = cells_no_step[mask_left]
 
     if len(cells_left) > 0:
@@ -217,9 +205,9 @@ def analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
     left_free = left_free_ratio > 0.7
 
     # --- RIGHT ZONE ---
-    # Cells to the right of the robot (full side, not just front-right)
-    mask_right = (proj_lateral > 0) & (proj_lateral <= lateral_width) & \
-                 (np.abs(proj_front) <= lateral_distance)
+    # Cells to the right: proj_lateral > 0 (right), proj_front between 0 and lateral_distance, proj_lateral < lateral_width
+    mask_right = (proj_front > 0) & (proj_front <= lateral_distance) & \
+                 (proj_lateral > 0) & (proj_lateral <= lateral_width)
     cells_right = cells_no_step[mask_right]
 
     if len(cells_right) > 0:
@@ -229,19 +217,6 @@ def analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
         right_free_ratio = 1.0
 
     right_free = right_free_ratio > 0.7
-
-    # --- REAR ZONE ---
-    # Cells behind the robot: proj_front < 0 and > -rear_distance, |proj_lateral| < 0.5m (robot width)
-    mask_rear = (proj_front < 0) & (proj_front >= -rear_distance) & (np.abs(proj_lateral) <= 0.5)
-    cells_rear = cells_no_step[mask_rear]
-
-    if len(cells_rear) > 0:
-        rear_free_count = np.sum(cells_rear > 0.0)
-        rear_free_ratio = rear_free_count / len(cells_rear)
-    else:
-        rear_free_ratio = 1.0
-
-    rear_free = rear_free_ratio > 0.7
 
     # --- RECOMMENDATION ---
     if not front_blocked:
@@ -260,17 +235,14 @@ def analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
         'front_blocked': front_blocked,
         'left_free': left_free,
         'right_free': right_free,
-        'rear_free': rear_free,
         'front_free_ratio': front_free_ratio,
         'left_free_ratio': left_free_ratio,
         'right_free_ratio': right_free_ratio,
-        'rear_free_ratio': rear_free_ratio,
         'recommendation': recommendation,
         'masks': {  # for debug/visualization
             'front': mask_front,
             'left': mask_left,
-            'right': mask_right,
-            'rear': mask_rear
+            'right': mask_right
         }
     }
 
@@ -516,7 +488,7 @@ class RecordingInterface(object):
             print('No waypoint_0 found in the graph.')
             return False
 
-        print(f"[INFO] Navigating back to first waypoint (waypoint_0)...")
+        print(f"🔙 Navigating back to first waypoint (waypoint_0)...")
         nav_to_cmd_id = None
         is_finished = False
 
@@ -530,7 +502,7 @@ class RecordingInterface(object):
             time.sleep(.5)  # Sleep for half a second to allow for command execution.
             is_finished = self._check_success(nav_to_cmd_id)
 
-        print("[OK] Arrived at first waypoint")
+        print(f"✅ Arrived at first waypoint")
         return True
 
     def navigate_to_previous_waypoint(self, steps_back=3):
@@ -549,7 +521,7 @@ class RecordingInterface(object):
         graph = self._graph_nav_client.download_graph()
 
         if not graph or len(graph.waypoints) == 0:
-            print('[WARNING] No waypoints found in the graph.')
+            print('⚠️ No waypoints found in the graph.')
             return False
 
         # Sort waypoints by name (assuming they are named waypoint_0, waypoint_1, etc.)
@@ -561,7 +533,7 @@ class RecordingInterface(object):
         if total_waypoints <= steps_back:
             # If we don't have enough waypoints, go back to the first one
             target_index = 0
-            print(f'[WARNING] Not enough waypoints to go back {steps_back} steps. Going to first waypoint instead.')
+            print(f'⚠️ Not enough waypoints to go back {steps_back} steps. Going to first waypoint instead.')
         else:
             # Go back steps_back waypoints from the last one
             target_index = total_waypoints - steps_back - 1
@@ -569,7 +541,7 @@ class RecordingInterface(object):
         target_waypoint = sorted_waypoints[target_index]
         target_name = target_waypoint.annotations.name
 
-        print(f"[INFO] Navigating back to previous waypoint: {target_name} (going back {steps_back} waypoints)")
+        print(f"🔙 Navigating back to previous waypoint: {target_name} (going back {steps_back} waypoints)")
         print(f"   Total waypoints in graph: {total_waypoints}")
         print(f"   Target waypoint index: {target_index}")
 
@@ -583,14 +555,14 @@ class RecordingInterface(object):
                     target_waypoint.id, 1.0, command_id=nav_to_cmd_id
                 )
             except Exception as e:
-                print(f'[ERROR] Error while navigating to {target_name}: {e}')
+                print(f'❌ Error while navigating to {target_name}: {e}')
                 return False
 
             time.sleep(.5)  # Sleep for half a second to allow for command execution.
             is_finished = self._check_success(nav_to_cmd_id)
 
-        print('[OK] Arrived at waypoint {0}'.format(target_name))
-        print('[INFO] Ready to retry with custom obstacle avoidance')
+        print(f"✅ Arrived at waypoint {target_name}")
+        print(f"🚀 Ready to retry with custom obstacle avoidance")
         return True
 
 
@@ -670,7 +642,7 @@ def check_path_clear(local_grid_client, robot_state_client, front_distance=0.2, 
             break
 
     if local_grid_proto is None:
-        print("[WARNING] No 'no_step' grid found in response")
+        print("⚠️ No 'no_step' grid found in response")
         # Return safe defaults
         return {
             'front_blocked': False,
@@ -693,7 +665,7 @@ def check_path_clear(local_grid_client, robot_state_client, front_distance=0.2, 
             BODY_FRAME_NAME
         )
     except Exception as e:
-        print(f"[WARNING] Failed to get robot transform from grid snapshot: {e}")
+        print(f"⚠️ Failed to get robot transform from grid snapshot: {e}")
         # Fallback: use current robot state (less accurate but better than crashing)
         robot_state = robot_state_client.get_robot_state()
         vision_tform_body = get_a_tform_b(
@@ -743,12 +715,12 @@ def safe_relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_sta
     initial_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y),
                              1.0 - 2.0 * (quat.y ** 2 + quat.z ** 2))
 
-    # Calculate target yaw (initial + requested rotation)
+    # ⭐ Calculate target yaw (initial + requested rotation)
     target_yaw = initial_yaw + dyaw
     # Normalize to [-π, π]
     target_yaw = np.arctan2(np.sin(target_yaw), np.cos(target_yaw))
 
-    print(f"[INFO] Mission start state:")
+    print(f"📍 Mission start state:")
     print(f"   Position: ({initial_x:.2f}, {initial_y:.2f}) m")
     print(f"   Initial yaw: {np.rad2deg(initial_yaw):.1f}°")
     print(f"   Target yaw: {np.rad2deg(target_yaw):.1f}°")
@@ -760,7 +732,7 @@ def safe_relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_sta
     success, distance_traveled = relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_state_client)
     total_traveled += distance_traveled
 
-    # Calculate yaw error
+    # ⭐ Check orientation after movement (even if success=True)
     current_state = robot_state_client.get_robot_state()
     current_vision_tform_body = get_a_tform_b(
         current_state.kinematic_state.transforms_snapshot,
@@ -781,31 +753,33 @@ def safe_relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_sta
     print(f"   Target yaw: {np.rad2deg(target_yaw):.1f}°")
     print(f"   Error: {np.rad2deg(yaw_error):.1f}°")
 
-    # If orientation is wrong (> 5°), correct it even if movement succeeded
+    # ⭐ If orientation is wrong (> 5°), correct it EVEN IF movement succeeded
     orientation_tolerance = np.deg2rad(5)  # 5° tolerance
 
     if abs(yaw_error) > orientation_tolerance:
-        print(f"[WARNING] Orientation error detected ({np.rad2deg(yaw_error):.1f}°)")
-        print(f"[INFO] Correcting orientation before proceeding...")
+        print(f"⚠️ Orientation error detected ({np.rad2deg(yaw_error):.1f}°)")
+        print(f"🔄 Correcting orientation before proceeding...")
 
         restore_success, _ = relative_move(0, 0, yaw_error, frame_name,
                                            robot_command_client, robot_state_client)
         if restore_success:
-            print(f"[OK] Orientation corrected")
-            # If movement succeeded AND orientation was corrected -> SUCCESS
+            print(f"✅ Orientation corrected")
+            # ⭐ If movement succeeded AND orientation was corrected → SUCCESS
             if success:
-                print(f"[OK] MOVEMENT COMPLETE: {total_traveled:.2f}m traveled successfully!")
+                print(f"✅ MOVEMENT COMPLETE: {total_traveled:.2f}m traveled successfully!")
                 return True, total_traveled
         else:
-            print(f"[ERROR] Failed to restore orientation")
+            print(f"❌ Failed to restore orientation")
             success = False  # Mark as failure if we can't restore orientation
 
+    # ⭐ If movement succeeded AND orientation is correct → SUCCESS
     if success:
-        print(f"[OK] MOVEMENT COMPLETE: {total_traveled:.2f}m traveled successfully!")
+        print(f"✅ MOVEMENT COMPLETE: {total_traveled:.2f}m traveled successfully!")
         return True, total_traveled
 
-    print(f"[ERROR] Movement failed after {distance_traveled:.2f}m")
-    print(f"[INFO] Restoring initial orientation before going back...")
+    # ⚠️ Movement failed or orientation can't be corrected → GO BACK
+    print(f"❌ Movement failed after {distance_traveled:.2f}m")
+    print(f"🔄 Restoring initial orientation before going back...")
 
     # Restore initial orientation (not target, but starting orientation)
     yaw_diff_to_initial = initial_yaw - current_yaw
@@ -816,11 +790,11 @@ def safe_relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_sta
         restore_success, _ = relative_move(0, 0, yaw_diff_to_initial, frame_name,
                                            robot_command_client, robot_state_client)
         if restore_success:
-            print(f"[OK] Initial orientation restored")
+            print(f"✅ Initial orientation restored")
         else:
-            print(f"[WARNING] Failed to restore initial orientation")
+            print(f"⚠️ Failed to restore initial orientation")
 
-    print(f"[INFO] Returning to previous waypoint...")
+    print(f"🔙 Returning to previous waypoint...")
     #recording_interface.navigate_to_previous_waypoint(steps_back=3)
     distance_covered = 0.0
     step_size = 0.5
@@ -834,27 +808,27 @@ def safe_relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_sta
             # Check whether the path ahead is clear
             nav_analysis = check_path_clear(local_grid_client, robot_state_client)
 
-            print(f"[INFO] Path analysis:")
-            print(f"  Front: {'FREE' if not nav_analysis['front_blocked'] else 'BLOCKED'} "
+            print(f"📊 Path analysis:")
+            print(f"  Front: {'🟢 FREE' if not nav_analysis['front_blocked'] else '🔴 BLOCKED'} "
                   f"({nav_analysis['front_free_ratio']*100:.0f}%)")
-            print(f"  Left: {'FREE' if nav_analysis['left_free'] else 'BLOCKED'} "
+            print(f"  Left: {'🟢 FREE' if nav_analysis['left_free'] else '🔴 BLOCKED'} "
                   f"({nav_analysis['left_free_ratio']*100:.0f}%)")
-            print(f"  Right: {'FREE' if nav_analysis['right_free'] else 'BLOCKED'} "
+            print(f"  Right: {'🟢 FREE' if nav_analysis['right_free'] else '🔴 BLOCKED'} "
                   f"({nav_analysis['right_free_ratio']*100:.0f}%)")
 
             if not nav_analysis['front_blocked']:
                 # Path is clear, proceed
-                print(f"[OK] Path clear, advancing {current_step:.2f}m")
+                print(f"✅ Path clear, advancing {current_step:.2f}m")
                 success = relative_move(current_step, dy, dyaw, frame_name,
                                        robot_command_client, robot_state_client)
                 if success:
                     distance_covered += current_step
                 else:
-                    print("[ERROR] Movement failed")
+                    print("❌ Movement failed")
                     return False
             else:
                 # Obstacle ahead: attempt avoidance
-                print(f"[WARNING] OBSTACLE DETECTED! Attempting lateral avoidance...")
+                print(f"\n🚨 OBSTACLE DETECTED! Attempting lateral avoidance...")
 
                 # Decide avoidance direction
                 if nav_analysis['recommendation'] == 'TURN_RIGHT' and nav_analysis['right_free']:
@@ -871,22 +845,22 @@ def safe_relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_sta
                     direction_name = "LEFT"
                 else:
                     # Blocked in all directions
-                    print(f"[ERROR] BLOCKED IN ALL DIRECTIONS!")
-                    print(f"[INFO] Returning to previous waypoint (3-4 steps back) to retry with custom obstacle avoidance...")
+                    print(f"\n🔴 BLOCKED IN ALL DIRECTIONS!")
+                    print(f"🔙 Returning to previous waypoint (3-4 steps back) to retry with custom obstacle avoidance...")
 
                     # Return to previous waypoint (3-4 steps back)
                     recording_interface.navigate_to_previous_waypoint(steps_back=3)
                     return False
 
-                print(f"[INFO] Attempting lateral avoidance to {direction_name} ({abs(lateral_dir):.1f}m)")
+                print(f"🔄 Attempting lateral avoidance to {direction_name} ({abs(lateral_dir):.1f}m)")
 
                 # Perform lateral movement
                 success_lateral = relative_move(0, lateral_dir, 0, frame_name,
                                                robot_command_client, robot_state_client)
 
                 if not success_lateral:
-                    print(f"[ERROR] Lateral movement failed")
-                    print(f"[INFO] Returning to previous waypoint (3-4 steps back)...")
+                    print(f"❌ Lateral movement failed")
+                    print(f"🔙 Returning to previous waypoint (3-4 steps back)...")
                     recording_interface.navigate_to_previous_waypoint(steps_back=3)
                     return False
 
@@ -895,30 +869,30 @@ def safe_relative_move(dx, dy, dyaw, frame_name, robot_command_client, robot_sta
                                                      front_distance=current_step + 0.5)
 
                 if not nav_analysis_after['front_blocked']:
-                    print(f"[OK] Path clear after lateral move to {direction_name}!")
+                    print(f"✅ Path clear after lateral move to {direction_name}!")
                     # Advance
                     success = relative_move(current_step, 0, 0, frame_name,
                                            robot_command_client, robot_state_client)
                     if success:
                         distance_covered += current_step
                         # Realign: return to original track
-                        print(f"[INFO] Realigning to original trajectory...")
+                        print(f"🔄 Realigning to original trajectory...")
                         relative_move(0, -lateral_dir, 0, frame_name,
                                      robot_command_client, robot_state_client)
                     else:
-                        print("[ERROR] Movement failed after avoidance")
+                        print("❌ Movement failed after avoidance")
                         recording_interface.navigate_to_previous_waypoint(steps_back=3)
                         return False
                 else:
                     # Still blocked after lateral move
-                    print(f"[ERROR] Still blocked after lateral move to {direction_name}")
-                    print(f"[INFO] Returning to previous waypoint (3-4 steps back)...")
+                    print(f"❌ Still blocked after lateral move to {direction_name}")
+                    print(f"🔙 Returning to previous waypoint (3-4 steps back)...")
                     recording_interface.navigate_to_previous_waypoint(steps_back=3)
                     return False
 
             time.sleep(0.5)  # Small delay between moves
 
-    print(f"\n[OK] MOVEMENT COMPLETE: {total_distance:.2f}m traveled successfully!")
+    print(f"\n✅ MOVEMENT COMPLETE: {total_distance:.2f}m traveled successfully!")
     return True
 
 
@@ -961,189 +935,154 @@ def easy_walk(options):
 
         recordingInterface.start_recording()
 
-        proto = local_grid_client.get_local_grids(['no_step'])
-        pts, cells_no_step, color = create_vtk_no_step_grid(proto, robot_state_client)
+        # proto = local_grid_client.get_local_grids(['no_step'])
+        # pts, cells_no_step, color = create_vtk_no_step_grid(proto, robot_state_client)
+        #
+        # # Extract x, y coordinates (in meters in the VISION frame)
+        # x = pts[:, 0]
+        # y = pts[:, 1]
+        #
+        # # Get robot position and orientation in the VISION frame
+        # robot_state = robot_state_client.get_robot_state()
+        # vision_tform_body = get_a_tform_b(
+        #     robot_state.kinematic_state.transforms_snapshot,
+        #     VISION_FRAME_NAME,
+        #     BODY_FRAME_NAME
+        # )
+        #
+        # robot_x = vision_tform_body.position.x
+        # robot_y = vision_tform_body.position.y
+        # # Extract yaw from quaternion (rotation around Z axis)
+        # quat = vision_tform_body.rotation
+        # # Compute yaw from quaternion: yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
+        # robot_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y),
+        #                        1.0 - 2.0 * (quat.y**2 + quat.z**2))
+        #
+        # # Analyze navigation zones
+        # nav_analysis = analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
+        #                                        front_distance=2.0, lateral_distance=1.5, lateral_width=1.0)
+        #
+        #
+        # # Visualize the no-step grid
+        # print(f"No-step grid: {len(pts)} cells")
+        # print(f"  - Non-steppable cells (no-step <= 0): {np.sum(cells_no_step <= 0.0)}")
+        # print(f"  - Steppable cells (no-step > 0): {np.sum(cells_no_step > 0.0)}")
+        # print(f"\nRobot position in VISION frame:")
+        # print(f"  - X: {robot_x:.2f} m")
+        # print(f"  - Y: {robot_y:.2f} m")
+        # print(f"  - Yaw (orientation): {np.rad2deg(robot_yaw):.1f}°")
+        #
+        # print(f"\n=== NAVIGATION ZONE ANALYSIS ===")
+        # print(f"FRONT ZONE (0-2m ahead):")
+        # print(f"  - Blocked: {'YES ❌' if nav_analysis['front_blocked'] else 'NO ✓'}")
+        # print(f"  - Free space: {nav_analysis['front_free_ratio']*100:.1f}%")
+        # print(f"\nLEFT ZONE:")
+        # print(f"  - Free: {'YES ✓' if nav_analysis['left_free'] else 'NO ❌'}")
+        # print(f"  - Free space: {nav_analysis['left_free_ratio']*100:.1f}%")
+        # print(f"\nRIGHT ZONE:")
+        # print(f"  - Free: {'YES ✓' if nav_analysis['right_free'] else 'NO ❌'}")
+        # print(f"  - Free space: {nav_analysis['right_free_ratio']*100:.1f}%")
+        # print(f"\n>>> RECOMMENDATION: {nav_analysis['recommendation']} <<<")
+        #
+        # # Plot: points colored by cells_no_step + highlight analyzed zones
+        # plt.figure(figsize=(14, 12))
+        #
+        # # Base grid (semi-transparent)
+        # colors_norm = color.astype(np.float32) / 255.0
+        # plt.scatter(x, y, c=colors_norm, s=3, alpha=0.8, label='No-step grid (base)')
+        #
+        # # Highlight the three zones of interest with distinct colors
+        # masks = nav_analysis['masks']
+        # if np.any(masks['front']):
+        #     plt.scatter(x[masks['front']], y[masks['front']],
+        #                c='yellow', s=20, alpha=1, edgecolors='orange', linewidths=0.5,
+        #                label='Front Zone', marker='s')
+        # if np.any(masks['left']):
+        #     plt.scatter(x[masks['left']], y[masks['left']],
+        #                c='cyan', s=20, alpha=1, edgecolors='blue', linewidths=0.5,
+        #                label='Left Zone', marker='^')
+        # if np.any(masks['right']):
+        #     plt.scatter(x[masks['right']], y[masks['right']],
+        #                c='magenta', s=20, alpha=1, edgecolors='purple', linewidths=0.5,
+        #                label='Right Zone', marker='v')
+        #
+        # # Draw robot as a marker + heading arrow
+        # plt.plot(robot_x, robot_y, 'go', markersize=18, label='Robot',
+        #         markeredgecolor='black', markeredgewidth=2.5, zorder=10)
+        #
+        # # Arrow showing heading (1.5 m length)
+        # arrow_length = 1.5
+        # dx_arrow = arrow_length * np.cos(robot_yaw)
+        # dy_arrow = arrow_length * np.sin(robot_yaw)
+        # plt.arrow(robot_x, robot_y, dx_arrow, dy_arrow,
+        #          head_width=0.4, head_length=0.3, fc='lime', ec='darkgreen', linewidth=3,
+        #          label='Direction', zorder=9)
+        #
+        # plt.xlabel('X [m] (VISION)', fontsize=12)
+        # plt.ylabel('Y [m] (VISION)', fontsize=12)
+        #
+        # title_color = 'green' if nav_analysis['recommendation'] == 'GO_STRAIGHT' else \
+        #               'blue' if nav_analysis['recommendation'] == 'TURN_LEFT' else \
+        #               'orange' if nav_analysis['recommendation'] == 'TURN_RIGHT' else 'red'
+        #
+        # plt.title(f'Navigation Analysis: {nav_analysis["recommendation"]}\n' +
+        #          f'(Front: {nav_analysis["front_free_ratio"]*100:.0f}% free, ' +
+        #          f'L: {nav_analysis["left_free_ratio"]*100:.0f}%, R: {nav_analysis["right_free_ratio"]*100:.0f}%)',
+        #          fontsize=14, fontweight='bold', color=title_color)
+        # plt.axis('equal')
+        # plt.grid(True, alpha=0.3)
+        # plt.legend(loc='upper right', fontsize=10)
+        # plt.tight_layout()
+        # plt.show()
+        #
+        # # === MISSIONE CON OBSTACLE AVOIDANCE ===
+        # print(f"\n{'='*70}")
+        # print(f"🚀 MISSION START: Movement with obstacle avoidance")
+        # print(f"{'='*70}\n")
+        #
+        # # Esempio: vai avanti di 7 metri con obstacle avoidance integrato
+        # mission_success = safe_relative_move(
+        #     dx=10.0,           # 7 metri avanti
+        #     dy=0.0,           # nessuno spostamento laterale iniziale
+        #     dyaw=0.0,         # mantieni orientamento
+        #     frame_name="vision",
+        #     robot_command_client=command_client,
+        #     robot_state_client=robot_state_client,
+        #     local_grid_client=local_grid_client,
+        #     recording_interface=recordingInterface,
+        #     lateral_offset=1,  # spostamento laterale di 2m per evitare ostacoli
+        #     max_retries=4
+        # )
+        recordingInterface.get_recording_status()
+        recordingInterface.create_default_waypoint()
+        recordingInterface.get_recording_status()
+        relative_move(0, 0, math.radians(5), "vision", command_client, robot_state_client)
+        recordingInterface.create_default_waypoint()
+        recordingInterface.get_recording_status()
+        relative_move(7, 0, 0, "vision", command_client, robot_state_client)
+        recordingInterface.create_default_waypoint()
+        recordingInterface.get_recording_status()
+        relative_move(0, 0, - math.radians(90), "vision", command_client, robot_state_client)
+        recordingInterface.create_default_waypoint()
+        recordingInterface.get_recording_status()
+        relative_move(2, 0, 0, "vision", command_client, robot_state_client)
+        recordingInterface.create_default_waypoint()
+        recordingInterface.get_recording_status()
 
-        # Extract x, y coordinates (in meters in the VISION frame)
-        x = pts[:, 0]
-        y = pts[:, 1]
-
-        # Get robot position and orientation in the VISION frame
-        robot_state = robot_state_client.get_robot_state()
-        vision_tform_body = get_a_tform_b(
-            robot_state.kinematic_state.transforms_snapshot,
-            VISION_FRAME_NAME,
-            BODY_FRAME_NAME
-        )
-
-        robot_x = vision_tform_body.position.x
-        robot_y = vision_tform_body.position.y
-        # Extract yaw from quaternion (rotation around Z axis)
-        quat = vision_tform_body.rotation
-        # Compute yaw from quaternion: yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
-        robot_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y),
-                               1.0 - 2.0 * (quat.y**2 + quat.z**2))
-        # Analyze navigation zones
-        nav_analysis = analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
-                                               front_distance=2.0, lateral_distance=1.5, lateral_width=1.0,
-                                               rear_distance=1.0)
+        recordingInterface.create_new_edge()
 
 
-        # Visualize the no-step grid
-        print(f"No-step grid: {len(pts)} cells")
-        print(f"  - Non-steppable cells (no-step <= 0): {np.sum(cells_no_step <= 0.0)}")
-        print(f"  - Steppable cells (no-step > 0): {np.sum(cells_no_step > 0.0)}")
-        print(f"\nRobot position in VISION frame:")
-        print(f"  - X: {robot_x:.2f} m")
-        print(f"  - Y: {robot_y:.2f} m")
-        print(f"  - Yaw (orientation): {np.rad2deg(robot_yaw):.1f}°")
 
-        print(f"\n=== NAVIGATION ZONE ANALYSIS ===")
-        print(f"FRONT ZONE (0-2m ahead):")
-        print(f"  - Blocked: {'YES' if nav_analysis['front_blocked'] else 'NO'}")
-        print(f"  - Free space: {nav_analysis['front_free_ratio']*100:.1f}%")
-        print(f"\nLEFT ZONE:")
-        print(f"  - Free: {'YES' if nav_analysis['left_free'] else 'NO'}")
-        print(f"  - Free space: {nav_analysis['left_free_ratio']*100:.1f}%")
-        print(f"\nRIGHT ZONE:")
-        print(f"  - Free: {'YES' if nav_analysis['right_free'] else 'NO'}")
-        print(f"  - Free space: {nav_analysis['right_free_ratio']*100:.1f}%")
-        print(f"\nREAR ZONE:")
-        print(f"  - Free: {'YES' if nav_analysis['rear_free'] else 'NO'}")
-        print(f"  - Free space: {nav_analysis['rear_free_ratio']*100:.1f}%")
-        print(f"\n>>> RECOMMENDATION: {nav_analysis['recommendation']} <<<")
-
-        # Plot: points colored by cells_no_step + highlight analyzed zones
-        plt.figure(figsize=(14, 12))
-
-        # Base grid (semi-transparent)
-        colors_norm = color.astype(np.float32) / 255.0
-        plt.scatter(x, y, c=colors_norm, s=3, alpha=0.8, label='No-step grid (base)')
-
-        # Highlight the four zones of interest with distinct colors
-        masks = nav_analysis['masks']
-        if np.any(masks['front']):
-            plt.scatter(x[masks['front']], y[masks['front']],
-                       c='yellow', s=20, alpha=0.4, edgecolors='orange', linewidths=0.5,
-                       label='Front Zone', marker='s')
-        if np.any(masks['left']):
-            plt.scatter(x[masks['left']], y[masks['left']],
-                       c='cyan', s=20, alpha=0.4, edgecolors='blue', linewidths=0.5,
-                       label='Left Zone', marker='^')
-        if np.any(masks['right']):
-            plt.scatter(x[masks['right']], y[masks['right']],
-                       c='magenta', s=20, alpha=0.4, edgecolors='purple', linewidths=0.5,
-                       label='Right Zone', marker='v')
-        if np.any(masks['rear']):
-            plt.scatter(x[masks['rear']], y[masks['rear']],
-                       c='orange', s=20, alpha=0.4, edgecolors='red', linewidths=0.5,
-                       label='Rear Zone', marker='o')
-
-        # Draw robot as a black rectangle (Spot dimensions: ~1.1m long x 0.5m wide)
-        import matplotlib.patches as patches
-        from matplotlib.transforms import Affine2D
-
-        robot_length = 1.1  # meters (front to back)
-        robot_width = 0.5   # meters (left to right)
-
-        # Create a rectangle centered at origin, then rotate and translate
-        robot_rect = patches.Rectangle(
-            (-robot_length/2, -robot_width/2),  # bottom-left corner when centered at origin
-            robot_length, robot_width,
-            fill=True,
-            facecolor='black',
-            edgecolor='white',
-            linewidth=2,
-            zorder=11
-        )
-
-        # Apply rotation (yaw) and translation (robot position)
-        transform = Affine2D().rotate(robot_yaw).translate(robot_x, robot_y) + plt.gca().transData
-        robot_rect.set_transform(transform)
-        plt.gca().add_patch(robot_rect)
-
-        # Draw robot center point (green dot on top of the rectangle)
-        plt.plot(robot_x, robot_y, 'go', markersize=8, label='Robot Center',
-                markeredgecolor='white', markeredgewidth=1.5, zorder=12)
-
-        # Add distance reference circles around the robot (e.g., 1m, 2m)
-        for r in [1.0, 2.0]:
-            circle = patches.Circle((robot_x, robot_y), r,
-                                    fill=False,
-                                    linestyle='--',
-                                    linewidth=1.0,
-                                    edgecolor='gray',
-                                    alpha=0.5)
-            plt.gca().add_patch(circle)
-            # Annotate radius
-            plt.text(robot_x + r, robot_y, f"{r:.0f} m",
-                     color='gray', fontsize=8, ha='left', va='bottom')
-
-        # Arrow showing heading (1.5 m length)
-        arrow_length = 1.5
-        dx_arrow = arrow_length * np.cos(robot_yaw)
-        dy_arrow = arrow_length * np.sin(robot_yaw)
-        plt.arrow(robot_x, robot_y, dx_arrow, dy_arrow,
-                 head_width=0.4, head_length=0.3, fc='lime', ec='darkgreen', linewidth=3,
-                 label='Direction', zorder=9)
-
-        plt.xlabel('X [m] (VISION)', fontsize=12)
-        plt.ylabel('Y [m] (VISION)', fontsize=12)
-
-        title_color = 'green' if nav_analysis['recommendation'] == 'GO_STRAIGHT' else \
-                      'blue' if nav_analysis['recommendation'] == 'TURN_LEFT' else \
-                      'orange' if nav_analysis['recommendation'] == 'TURN_RIGHT' else 'red'
-
-        plt.title(f'Navigation Analysis: {nav_analysis["recommendation"]}\n' +
-                 f'(Front: {nav_analysis["front_free_ratio"]*100:.0f}% free, ' +
-                 f'L: {nav_analysis["left_free_ratio"]*100:.0f}%, R: {nav_analysis["right_free_ratio"]*100:.0f}%)',
-                 fontsize=14, fontweight='bold', color=title_color)
-        plt.axis('equal')
-        plt.grid(True, alpha=0.3)
-        plt.legend(loc='upper right', fontsize=10)
-        plt.tight_layout()
-        plt.show()
-
-        # === MISSIONE CON OBSTACLE AVOIDANCE ===
-        print(f"\n{'='*70}")
-        print(f"[INFO] MISSION START: Movement with obstacle avoidance")
-        print(f"{'='*70}\n")
-
-        # Esempio: vai avanti di 7 metri con obstacle avoidance integrato
-        mission_success = safe_relative_move(
-            dx=0.0,           # 7 metri avanti
-            dy=0.0,           # nessuno spostamento laterale iniziale
-            dyaw=0.0,         # mantieni orientamento
-            frame_name="vision",
-            robot_command_client=command_client,
-            robot_state_client=robot_state_client,
-            local_grid_client=local_grid_client,
-            recording_interface=recordingInterface,
-            lateral_offset=1,  # spostamento laterale di 2m per evitare ostacoli
-            max_retries=4
-        )
-
-        # --- SIMPLE MISSION WITHOUT OBSTACLE AVOIDANCE ---
-
-        # recordingInterface.get_recording_status()
-        # recordingInterface.create_default_waypoint()
-        # recordingInterface.get_recording_status()
-        # relative_move(0, 0, math.radians(0), "vision", command_client, robot_state_client)
-        # recordingInterface.create_default_waypoint()
-        # recordingInterface.get_recording_status()
-        # relative_move(0, 0, 0, "vision", command_client, robot_state_client)
-        # recordingInterface.create_default_waypoint()
-        # recordingInterface.get_recording_status()
-        # relative_move(0, 0, - math.radians(0), "vision", command_client, robot_state_client)
-        # recordingInterface.create_default_waypoint()
-        # recordingInterface.get_recording_status()
-        # relative_move(0, 0, 0, "vision", command_client, robot_state_client)
-        # recordingInterface.create_default_waypoint()
-        # recordingInterface.get_recording_status()
-
-        # --- END OF SIMPLE MISSION ---
-
-        #recordingInterface.create_new_edge()
+        # if mission_success:
+        #     robot.logger.info('✅ Mission completed successfully!')
+        #     print(f"\n{'='*70}")
+        #     print(f"✅ MISSION COMPLETED SUCCESSFULLY!")
+        #     print(f"{'='*70}\n")
+        # else:
+        #     robot.logger.info('❌ Mission failed - robot returned to initial position')
+        #     print(f"\n{'='*70}")
+        #     print(f"❌ MISSION FAILED - Returned to initial position")
+        #     print(f"{'='*70}\n")
 
         robot.logger.info('Robot mission completed.')
         log_comment = 'Easy autowalk with obstacle avoidance.'
@@ -1198,11 +1137,11 @@ def _maybe_save_image(image, path):
         logger.warning('Exception thrown saving image. %r', exc)
 
 
-# FIXME Change hostname for Jetson/localhost
+# FIXME Change hostname for Jetson
 def main():
     # Instead of argparse, create an options object manually
     options = SimpleNamespace()
-    options.hostname = "192.168.80.3"
+    options.hostname = "192.168.50.5"
     options.verbose = False
     options.recording_user_name = ""
     options.recording_session_name = ""

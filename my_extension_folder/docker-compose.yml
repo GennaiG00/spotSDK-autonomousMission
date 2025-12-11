@@ -1,9 +1,10 @@
 version: '2.4'
 services:
-  my-app:
-    image: easy-walk:v2
+  easy-walk-app:
+    image: easy-walk:v1
+    container_name: easy-walk-container
     network_mode: host
     restart: always
-    # Il documento raccomanda FORTEMENTE di mettere limiti di memoria
     mem_limit: 500m
-    command: ["192.168.50.3", "--host-ip=192.168.50.5"]
+    logging:
+      driver: journald

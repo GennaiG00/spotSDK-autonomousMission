@@ -1,8 +1,8 @@
 {
-  "extension_name": "spot_easy_walk",
+  "extension_name": "easywalk",
   "version": "1.0.0",
-  "description": "Extension to easy_walk Spot robot using Jetson",
+  "description": "Easy Walk Script per CORE I/O",
   "images": [
-    "easy-walk.tgz"
+    "easywalk.tgz"
   ]
 }
