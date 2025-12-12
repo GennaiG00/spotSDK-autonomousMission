@@ -4,6 +4,8 @@ import sys
 import time
 from time import sleep
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 import bosdyn.client
 import bosdyn.client.lease
@@ -11,21 +13,15 @@ import bosdyn.client.util
 import bosdyn.geometry
 from bosdyn.client.frame_helpers import *
 from bosdyn.client.robot_command import (RobotCommandBuilder, RobotCommandClient, blocking_stand)
-from bosdyn.client.robot_state import RobotStateClient
-from bosdyn.api.basic_command_pb2 import RobotCommandFeedbackStatus
-from bosdyn.client import math_helpers
 from bosdyn.client.local_grid import LocalGridClient
 from bosdyn.client.frame_helpers import get_a_tform_b
-from bosdyn.api import local_grid_pb2
 from types import SimpleNamespace
-from bosdyn.client.recording import GraphNavRecordingServiceClient
-from bosdyn.client.estop import EstopClient
-from matplotlib import pyplot as plt
 import navGraphUtils
 import movements
 import spotGrid
 import spotLogInUtils
-
+import environmentMap
+import spotUtils
 
 def check_path_clear(local_grid_client, robot_state_client, front_distance=0.2, threshold=0.7):
     """
@@ -300,6 +296,270 @@ def check_path_clear(local_grid_client, robot_state_client, front_distance=0.2, 
 #     return True
 
 
+def check_line_of_sight(x1, y1, x2, y2, pts, cells, obstacle_threshold=0.0):
+    """
+    Check if there's a clear line of sight between two points.
+    Uses sampling along the line to check for obstacles.
+
+    Args:
+        x1, y1: Start coordinates (robot position)
+        x2, y2: End coordinates (target point)
+        pts: Grid points array
+        cells: Grid cell values (<=0=obstacle, >0=free)
+        obstacle_threshold: Cell value below which it's considered blocked
+
+    Returns:
+        bool: True if path is clear, False if blocked
+    """
+    # Number of points to check along the line
+    distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+    num_checks = max(10, int(distance * 10))  # 10 checks per meter
+
+    for i in range(num_checks):
+        t = i / max(1, num_checks - 1)
+        check_x = x1 + t * (x2 - x1)
+        check_y = y1 + t * (y2 - y1)
+
+        # Find nearest grid point
+        distances = np.sqrt((pts[:, 0] - check_x)**2 + (pts[:, 1] - check_y)**2)
+        nearest_idx = np.argmin(distances)
+
+        # Check if this point is an obstacle (cells_no_step <= 0 means obstacle)
+        if cells[nearest_idx] <= obstacle_threshold:
+            return False  # Path blocked
+
+    return True  # Path clear
+
+
+def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
+                                   candidates, chosen_point, iteration):
+    """
+    Visualize the no-step grid with sampled candidates and chosen point.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+
+    plt.figure(figsize=(12, 10))
+
+    # Plot grid points
+    x = pts[:, 0]
+    y = pts[:, 1]
+    colors_norm = color.astype(np.float32) / 255.0
+    plt.scatter(x, y, c=colors_norm, s=2, alpha=0.6, label='Grid')
+
+    # Plot rejected candidates (red X)
+    if 'rejected' in candidates:
+        for point in candidates['rejected']:
+            plt.plot(point[0], point[1], 'rx', markersize=8, markeredgewidth=2)
+
+    # Plot valid candidates (green circles)
+    if 'valid' in candidates:
+        for point in candidates['valid']:
+            plt.plot(point[0], point[1], 'go', markersize=8, markerfacecolor='none',
+                    markeredgewidth=2)
+
+    # Plot chosen point (large green star)
+    if chosen_point is not None:
+        plt.plot(chosen_point[0], chosen_point[1], 'g*', markersize=20,
+                markeredgewidth=2, label='Chosen point')
+
+        # Draw line from robot to chosen point
+        plt.plot([robot_x, chosen_point[0]], [robot_y, chosen_point[1]],
+                'g--', linewidth=2, alpha=0.7)
+
+    # Draw robot position (large blue dot)
+    plt.plot(robot_x, robot_y, 'bo', markersize=15, label='Robot')
+
+    # Add distance circles
+    for r in [1.0, 2.0, 3.0]:
+        circle = patches.Circle((robot_x, robot_y), r, fill=False,
+                               linestyle='--', linewidth=1,
+                               edgecolor='blue', alpha=0.3)
+        plt.gca().add_patch(circle)
+
+    plt.xlabel('X [m] (VISION)', fontsize=11)
+    plt.ylabel('Y [m] (VISION)', fontsize=11)
+    plt.title(f'Iteration {iteration}: Random Sampling\n'
+              f'Green circles=valid | Red X=blocked | Green star=chosen',
+              fontsize=12, fontweight='bold')
+    plt.axis('equal')
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='upper right')
+    plt.tight_layout()
+    plt.show()
+
+
+def sample_and_move_to_free_point(local_grid_client, robot_state_client, command_client,
+                                  num_samples=20, iteration=1):
+    """
+    Sample random points in the no-step grid, check if path is clear,
+    and move to the best reachable point.
+
+    Returns:
+        tuple: (success: bool, chosen_point: tuple or None)
+    """
+    print(f"\n{'='*60}")
+    print(f"[SAMPLING] Iteration {iteration}: Sampling {num_samples} random points")
+    print(f"{'='*60}")
+
+    # Get local grid
+    proto = local_grid_client.get_local_grids(['no_step'])
+    pts, cells_no_step, color = spotGrid.create_vtk_no_step_grid(proto, robot_state_client)
+
+    # Get grid proto
+    local_grid_proto = None
+    for local_grid_found in proto:
+        if local_grid_found.local_grid_type_name == 'no_step':
+            local_grid_proto = local_grid_found
+            break
+
+    if local_grid_proto is None:
+        print("[ERROR] No 'no_step' grid found")
+        return False, None
+
+    transforms_snapshot = local_grid_proto.local_grid.transforms_snapshot
+
+    # Get robot position
+    vision_tform_body = get_a_tform_b(
+        transforms_snapshot,
+        VISION_FRAME_NAME,
+        BODY_FRAME_NAME
+    )
+    robot_x = vision_tform_body.position.x
+    robot_y = vision_tform_body.position.y
+
+    print(f"[INFO] Robot position: ({robot_x:.2f}, {robot_y:.2f})")
+    print(f"[INFO] Grid has {len(pts)} points")
+
+    # Sample random points
+    valid_candidates = []
+    rejected_candidates = []
+
+    for i in range(num_samples):
+        # Pick random point from grid
+        random_idx = np.random.randint(0, len(pts))
+        target_point = pts[random_idx]
+        target_x, target_y = target_point[0], target_point[1]
+
+        # Calculate distance and direction
+        dx = target_x - robot_x
+        dy = target_y - robot_y
+        distance = np.sqrt(dx**2 + dy**2)
+
+        # Skip points too close (<1.0m) or too far (>4m)
+        if distance < 1.0 or distance > 4.0:
+            rejected_candidates.append((target_x, target_y))
+            continue
+
+        # Check if target point itself is free
+        if cells_no_step[random_idx] <= 0:
+            print(f"[X] Point {i+1}: ({target_x:.2f}, {target_y:.2f}) - Target is obstacle")
+            rejected_candidates.append((target_x, target_y))
+            continue
+
+        # Check if path is clear
+        path_clear = check_line_of_sight(robot_x, robot_y, target_x, target_y,
+                                         pts, cells_no_step)
+
+        if path_clear:
+            valid_candidates.append({
+                'point': (target_x, target_y),
+                'distance': distance,
+                'dx': dx,
+                'dy': dy,
+                'cell_value': cells_no_step[random_idx]
+            })
+            print(f"[OK] Point {i+1}: ({target_x:.2f}, {target_y:.2f}) "
+                  f"dist={distance:.2f}m - PATH CLEAR")
+        else:
+            print(f"[X] Point {i+1}: ({target_x:.2f}, {target_y:.2f}) "
+                  f"dist={distance:.2f}m - BLOCKED")
+            rejected_candidates.append((target_x, target_y))
+
+    if not valid_candidates:
+        print("[ERROR] No valid reachable points found!")
+
+        # Visualize anyway to show why nothing was found
+        visualize_grid_with_candidates(
+            pts, cells_no_step, color, robot_x, robot_y,
+            {'rejected': rejected_candidates, 'valid': []},
+            None, iteration
+        )
+
+        # UNSTUCK BEHAVIOR: If no valid points, try to back up and rotate
+        print("[UNSTUCK] Attempting to get unstuck...")
+        print("[UNSTUCK] Step 1: Backing up 1.5m")
+        backup_success = movements.relative_move(-1, 0, 0, "vision",
+                                                command_client, robot_state_client)
+
+        if backup_success:
+            print("[UNSTUCK] Step 2: Rotating 90° to explore new direction")
+            rotate_success = movements.relative_move(0, 0, np.pi/2, "vision",
+                                                    command_client, robot_state_client)
+            if rotate_success:
+                print("[OK] Unstuck maneuver completed, will retry next iteration")
+                return False, None
+
+        print("[WARNING] Unstuck maneuver failed")
+        return False, None
+
+    # Sort by distance (prefer FARTHEST points for better exploration)
+    valid_candidates.sort(key=lambda x: x['distance'], reverse=True)
+
+    # Choose best point (FARTHEST with clear path)
+    best = valid_candidates[0]
+    chosen_point = best['point']
+
+    print(f"\n[INFO] Choosing point: ({chosen_point[0]:.2f}, {chosen_point[1]:.2f})")
+    print(f"       Distance: {best['distance']:.2f}m")
+    print(f"       Valid candidates found: {len(valid_candidates)}")
+
+    # Visualize grid with candidates
+    valid_points = [c['point'] for c in valid_candidates]
+    visualize_grid_with_candidates(
+        pts, cells_no_step, color, robot_x, robot_y,
+        {'rejected': rejected_candidates, 'valid': valid_points},
+        chosen_point, iteration
+    )
+
+    # Calculate yaw to face the target
+    target_yaw = np.arctan2(best['dy'], best['dx'])
+
+    # Get current yaw
+    quat = vision_tform_body.rotation
+    current_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y),
+                             1.0 - 2.0 * (quat.y**2 + quat.z**2))
+
+    # Calculate rotation needed
+    dyaw = target_yaw - current_yaw
+    dyaw = np.arctan2(np.sin(dyaw), np.cos(dyaw))  # Normalize to [-π, π]
+
+    print(f"[INFO] Required rotation: {np.rad2deg(dyaw):.1f}°")
+
+    # First rotate to face target
+    print("[INFO] Step 1: Rotating to face target...")
+    success_rot = movements.relative_move(0, 0, dyaw, "vision",
+                                         command_client, robot_state_client)
+
+    if not success_rot:
+        print("[ERROR] Failed to rotate")
+        return False, chosen_point
+
+    time.sleep(0.5)
+
+    # Then move forward
+    print(f"[INFO] Step 2: Moving forward {best['distance']:.2f}m...")
+    success_move = movements.relative_move(best['distance'], 0, 0, "vision",
+                                          command_client, robot_state_client)
+
+    if success_move:
+        print(f"[OK] Successfully reached target point!")
+        return True, chosen_point
+    else:
+        print(f"[ERROR] Failed to reach target point")
+        return False, chosen_point
+
+
 def easy_walk(options):
     robot, lease_client, robot_state_client, client_metadata = spotLogInUtils.setLogInfo(options)
 
@@ -308,7 +568,6 @@ def easy_walk(options):
     recordingInterface = navGraphUtils.RecordingInterface(robot, options.download_filepath, client_metadata)
     recordingInterface.stop_recording()
     recordingInterface.clear_map()
-
 
     with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
@@ -321,34 +580,73 @@ def easy_walk(options):
         blocking_stand(command_client)
 
         recordingInterface.start_recording()
+        resp = recordingInterface.create_default_waypoint()
 
-        proto = local_grid_client.get_local_grids(['no_step'])
-        pts, cells_no_step, color = spotGrid.create_vtk_no_step_grid(proto, robot_state_client)
+        env = environmentMap.EnvironmentMap(cell_size=1, rows=10, cols=10)
+        x_boot, y_boot, z_boot = spotUtils.getPosition(robot_state_client)
+        env.set_origin(x_boot, y_boot, start_row=5, start_col=5)  # Start from center of grid
 
-        # Extract x, y coordinates (in meters in the VISION frame)
-        x = pts[:, 0]
-        y = pts[:, 1]
+        print(f'[INIT] Boot position: x={x_boot:.3f}, y={y_boot:.3f}, z={z_boot:.3f}')
 
-        # Get robot position and orientationNo non lo  in the VISION frame
-        robot_state = robot_state_client.get_robot_state()
-        vision_tform_body = get_a_tform_b(
-            robot_state.kinematic_state.transforms_snapshot,
-            VISION_FRAME_NAME,
-            BODY_FRAME_NAME
-        )
+        # Random exploration loop
+        num_iterations = 10
+        consecutive_failures = 0
+        max_consecutive_failures = 3
 
-        robot_x = vision_tform_body.position.x
-        robot_y = vision_tform_body.position.y
-        # Extract yaw from quaternion (rotation around Z axis)
-        quat = vision_tform_body.rotation
-        # Compute yaw from quaternion: yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
-        robot_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y),
-                               1.0 - 2.0 * (quat.y**2 + quat.z**2))
+        for iteration in range(1, num_iterations + 1):
+            print(f"\n{'#'*70}")
+            print(f"### ITERATION {iteration}/{num_iterations} ###")
+            print(f"{'#'*70}\n")
+
+            # Sample and move to random free point
+            success, chosen_point = sample_and_move_to_free_point(
+                local_grid_client,
+                robot_state_client,
+                command_client,
+                num_samples=20,
+                iteration=iteration
+            )
+
+            if success:
+                # Reset failure counter on success
+                consecutive_failures = 0
+
+                # Get new position
+                x, y, z = spotUtils.getPosition(robot_state_client)
+                print(f'[POS] Current position: x={x:.3f}, y={y:.3f}')
+                print(f'[POS] Delta from boot: dx={x-x_boot:.3f}, dy={y-y_boot:.3f}')
+
+                # Update map
+                env.update_position(x, y)
+                env.print_map()
+
+                # Create waypoint
+                recordingInterface.create_default_waypoint()
+                print(f"[OK] Waypoint created for iteration {iteration}")
+
+                time.sleep(1)
+            else:
+                consecutive_failures += 1
+                print(f"[WARNING] Iteration {iteration} failed (consecutive failures: {consecutive_failures}/{max_consecutive_failures})")
+
+                # If too many consecutive failures, try more aggressive unstuck
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"\n[UNSTUCK] Too many failures! Attempting aggressive recovery...")
+
+                    # Rotate 180° to face completely opposite direction
+                    print("[UNSTUCK] Rotating 180° to explore opposite direction")
+                    movements.relative_move(0, 0, np.pi, "vision",
+                                          command_client, robot_state_client)
+                    time.sleep(1)
+
+                    # Reset counter after aggressive recovery
+                    consecutive_failures = 0
+
+                time.sleep(0.5)
 
         recordingInterface.get_recording_status()
         recordingInterface.create_default_waypoint()
         recordingInterface.get_recording_status()
-        movements.relative_move(0, 0, math.radians(0), "vision", command_client, robot_state_client)
 
         # --- END OF SIMPLE MISSION ---
 
@@ -364,6 +662,7 @@ def easy_walk(options):
         recordingInterface.navigate_to_first_waypoint()
         command_client.robot_command(RobotCommandBuilder.synchro_sit_command(), end_time_secs=time.time() + 20)
         sleep(5)
+        robot.power_off(cut_immediately=False)
         recordingInterface.download_full_graph()
         estop.stop()
 

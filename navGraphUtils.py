@@ -111,6 +111,7 @@ class RecordingInterface(object):
 
         if resp.status == recording_pb2.CreateWaypointResponse.STATUS_OK:
             print('Successfully created a waypoint.')
+            return resp
         else:
             print('Could not create a waypoint.')
 

@@ -49,7 +49,7 @@ class EnvironmentMap(object):
         # Convert to grid coordinates
         # Adding start_cell offset to account for starting position
         col = self.start_cell[1] + int(delta_x / self.cell_size)
-        row = self.start_cell[0] - int(delta_y / self.cell_size)  # Negative because Y increases upward but row increases downward
+        row = self.start_cell[0] + int(delta_y / self.cell_size)  # Negative because Y increases upward but row increases downward
 
         # Check bounds
         if 0 <= row < self.rows and 0 <= col < self.cols:
