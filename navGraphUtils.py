@@ -328,3 +328,47 @@ class RecordingInterface(object):
         print('[OK] Arrived at waypoint {0}'.format(target_name))
         print('[INFO] Ready to retry with custom obstacle avoidance')
         return True
+
+    def get_waypoint_list(self):
+        """
+        Get the list of all waypoints in the current graph.
+
+        Returns:
+            list: List of waypoint objects from the graph
+        """
+        graph = self._graph_nav_client.download_graph()
+        if not graph or len(graph.waypoints) == 0:
+            return []
+        return list(graph.waypoints)
+
+    def navigate_to_waypoint(self, waypoint_id, timeout=1.0):
+        """
+        Navigate to a specific waypoint by ID.
+
+        Args:
+            waypoint_id: The unique ID of the waypoint to navigate to
+            timeout: Timeout for navigation command
+
+        Returns:
+            bool: True if navigation succeeded, False otherwise
+        """
+        nav_to_cmd_id = None
+        is_finished = False
+
+        print(f"[NAV] Navigating to waypoint ID: {waypoint_id}")
+
+        while not is_finished:
+            try:
+                nav_to_cmd_id = self._graph_nav_client.navigate_to(
+                    waypoint_id, timeout, command_id=nav_to_cmd_id
+                )
+            except Exception as e:
+                print(f'[ERROR] Error while navigating to waypoint: {e}')
+                return False
+
+            time.sleep(.5)  # Sleep for half a second to allow for command execution
+            is_finished = self._check_success(nav_to_cmd_id)
+
+        print(f'[OK] Arrived at waypoint {waypoint_id}')
+        return True
+
