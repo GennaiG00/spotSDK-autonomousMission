@@ -159,6 +159,28 @@ class RecordingInterface(object):
                 print(f'Stop recording failed: {err}')
                 break
 
+    def online_full_graph_download(self):
+        graph = self._graph_nav_client.download_graph()
+        if graph is None:
+            print('Failed to download the graph.')
+            return
+        for edge in graph.edges:
+            if len(edge.snapshot_id) == 0:
+                continue
+            try:
+                self._graph_nav_client.download_edge_snapshot(edge.snapshot_id)
+            except Exception:
+                print(f'Failed to download edge snapshot: {edge.snapshot_id}')
+                continue
+        for waypoint in graph.waypoints:
+            if len(waypoint.snapshot_id) == 0:
+                continue
+            try:
+                self._graph_nav_client.download_waypoint_snapshot(waypoint.snapshot_id)
+            except Exception:
+                print(f'Failed to download waypoint snapshot: {waypoint.snapshot_id}')
+                continue
+
     def download_full_graph(self, *args):
         graph = self._graph_nav_client.download_graph()
         if graph is None:
@@ -237,6 +259,8 @@ class RecordingInterface(object):
             return True
         elif status.status == graph_nav_pb2.NavigationFeedbackResponse.STATUS_ROBOT_IMPAIRED:
             print('Robot is impaired.')
+            return True
+        elif status.status == 7:
             return True
         else:
             return False
@@ -359,9 +383,12 @@ class RecordingInterface(object):
 
         while not is_finished:
             try:
+                self.stop_recording()
+                self.download_full_graph()
                 nav_to_cmd_id = self._graph_nav_client.navigate_to(
                     waypoint_id, timeout, command_id=nav_to_cmd_id
                 )
+                self.start_recording()
             except Exception as e:
                 print(f'[ERROR] Error while navigating to waypoint: {e}')
                 return False
