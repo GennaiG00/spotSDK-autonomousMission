@@ -2,7 +2,7 @@ import math
 import os
 import sys
 import time
-from time import sleep
+from time import sleep, altzone
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -22,73 +22,6 @@ import spotGrid
 import spotLogInUtils
 import environmentMap
 import spotUtils
-
-def check_path_clear(local_grid_client, robot_state_client, front_distance=0.2, threshold=0.7):
-    """
-    Check whether the path in front of the robot is clear.
-    Uses the transforms_snapshot from the local grid to ensure synchronization
-    between robot position and grid data.
-
-    Returns:
-        dict with 'front_blocked', 'left_free', 'right_free', 'recommendation'
-    """
-    # Get local grid (this contains a transforms_snapshot at the time the grid was captured)
-    proto = local_grid_client.get_local_grids(['no_step'])
-    pts, cells_no_step, color = spotGrid.create_vtk_no_step_grid(proto, robot_state_client)
-
-    # Extract the local grid proto to access its transforms_snapshot
-    local_grid_proto = None
-    for local_grid_found in proto:
-        if local_grid_found.local_grid_type_name == 'no_step':
-            local_grid_proto = local_grid_found
-            break
-
-    if local_grid_proto is None:
-        print("[WARNING] No 'no_step' grid found in response")
-        # Return safe defaults
-        return {
-            'front_blocked': False,
-            'left_free': True,
-            'right_free': True,
-            'front_free_ratio': 1.0,
-            'left_free_ratio': 1.0,
-            'right_free_ratio': 1.0,
-            'recommendation': 'GO_STRAIGHT',
-            'masks': {'front': [], 'left': [], 'right': []}
-        }
-
-    transforms_snapshot = local_grid_proto.local_grid.transforms_snapshot
-
-    # Get robot position using the SAME transforms_snapshot as the grid
-    try:
-        vision_tform_body = get_a_tform_b(
-            transforms_snapshot,  # Use grid's snapshot, not current robot state
-            VISION_FRAME_NAME,
-            BODY_FRAME_NAME
-        )
-    except Exception as e:
-        print(f"[WARNING] Failed to get robot transform from grid snapshot: {e}")
-        # Fallback: use current robot state (less accurate but better than crashing)
-        robot_state = robot_state_client.get_robot_state()
-        vision_tform_body = get_a_tform_b(
-            robot_state.kinematic_state.transforms_snapshot,
-            VISION_FRAME_NAME,
-            BODY_FRAME_NAME
-        )
-
-    robot_x = vision_tform_body.position.x
-    robot_y = vision_tform_body.position.y
-    quat = vision_tform_body.rotation
-    robot_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y),
-                           1.0 - 2.0 * (quat.y**2 + quat.z**2))
-
-    # Analyze zones (now synchronized!)
-    nav_analysis = spotGrid.analyze_navigation_zones(pts, cells_no_step, robot_x, robot_y, robot_yaw,
-                                           front_distance=front_distance,
-                                           lateral_distance=1.5,
-                                           lateral_width=1.0)
-
-    return nav_analysis
 
 def find_nearest_waypoint_to_cell(env, target_cell, recording_interface):
     """
@@ -145,7 +78,6 @@ def navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command
     """
     print(f"\n[NAV] Navigating to cell {target_cell} via waypoint...")
 
-    # Find nearest waypoint
     waypoint_id = find_nearest_waypoint_to_cell(env, target_cell, recording_interface)
     if waypoint_id is None:
         print("[ERROR] No waypoints available for navigation")
@@ -162,77 +94,7 @@ def navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command
     print(f"[OK] Reached waypoint {waypoint_id}")
     time.sleep(1)
 
-    # Now move from waypoint to target cell
-    print(f"[NAV] Step 2: Moving from waypoint to target cell {target_cell}...")
-
-    # Get target world position
-    world_pos = env.get_world_position_from_cell(target_cell[0], target_cell[1])
-    if world_pos is None:
-        print(f"[ERROR] Failed to get world position for cell {target_cell}")
-        return False, target_cell
-
-    target_x, target_y = world_pos
-
-    # Get current robot position
-    proto = local_grid_client.get_local_grids(['no_step'])
-    pts, cells_no_step, color = spotGrid.create_vtk_no_step_grid(proto, robot_state_client)
-
-    local_grid_proto = None
-    for local_grid_found in proto:
-        if local_grid_found.local_grid_type_name == 'no_step':
-            local_grid_proto = local_grid_found
-            break
-
-    if local_grid_proto is None:
-        print("[ERROR] No 'no_step' grid found")
-        return False, target_cell
-
-    transforms_snapshot = local_grid_proto.local_grid.transforms_snapshot
-    vision_tform_body = get_a_tform_b(transforms_snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME)
-
-    robot_x = vision_tform_body.position.x
-    robot_y = vision_tform_body.position.y
-
-    # Calculate movement needed
-    dx = target_x - robot_x
-    dy = target_y - robot_y
-    distance = np.sqrt(dx**2 + dy**2)
-
-    print(f"[NAV] Distance from waypoint to cell: {distance:.2f}m")
-
-    # Check if path is clear
-    path_clear = check_line_of_sight(robot_x, robot_y, target_x, target_y, pts, cells_no_step)
-
-    if not path_clear:
-        print(f"[WARNING] Path from waypoint to cell {target_cell} is still BLOCKED")
-        return False, target_cell
-
-    # Calculate yaw
-    target_yaw = np.arctan2(dy, dx)
-    quat = vision_tform_body.rotation
-    current_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y),
-                             1.0 - 2.0 * (quat.y**2 + quat.z**2))
-    dyaw = target_yaw - current_yaw
-    dyaw = np.arctan2(np.sin(dyaw), np.cos(dyaw))
-
-    # Rotate and move
-    print(f"[NAV] Rotating {np.rad2deg(dyaw):.1f}° and moving {distance:.2f}m to cell...")
-
-    success_rot = movements.relative_move(0, 0, dyaw, "vision", command_client, robot_state_client)
-    if not success_rot:
-        print("[ERROR] Failed to rotate towards cell")
-        return False, target_cell
-
-    time.sleep(0.5)
-
-    success_move = movements.relative_move(distance, 0, 0, "vision", command_client, robot_state_client)
-    if not success_move:
-        print("[ERROR] Failed to move to cell")
-        return False, target_cell
-
-    print(f"[OK] Successfully reached cell {target_cell} via waypoint navigation!")
     return True, target_cell
-
 
 def check_line_of_sight(x1, y1, x2, y2, pts, cells, obstacle_threshold=0.0):
     """
@@ -269,11 +131,106 @@ def check_line_of_sight(x1, y1, x2, y2, pts, cells, obstacle_threshold=0.0):
     return True  # Path clear
 
 
+def sample_cell_points(env, cell_row, cell_col, num_samples=20):
+    """
+    Sample random points within a cell.
+
+    Args:
+        env: EnvironmentMap instance
+        cell_row: Row index of the cell
+        cell_col: Column index of the cell
+        num_samples: Number of random points to generate
+
+    Returns:
+        list of (x, y) tuples representing sampled points in world coordinates
+    """
+    # Get cell center in world coordinates
+    world_pos = env.get_world_position_from_cell(cell_row, cell_col)
+    if world_pos is None:
+        return []
+
+    cell_center_x, cell_center_y = world_pos
+    half_size = env.cell_size / 2.0
+
+    # Generate random offsets within the cell (in grid frame)
+    samples = []
+    for _ in range(num_samples):
+        # Random offset from center in grid frame
+        offset_x = np.random.uniform(-half_size * 0.8, half_size * 0.8)  # 80% to avoid edges
+        offset_y = np.random.uniform(-half_size * 0.8, half_size * 0.8)
+
+        # Rotate offset to world frame
+        cos_yaw = np.cos(env.origin_yaw)
+        sin_yaw = np.sin(env.origin_yaw)
+
+        world_offset_x = offset_x * cos_yaw - offset_y * sin_yaw
+        world_offset_y = offset_x * sin_yaw + offset_y * cos_yaw
+
+        # Final world position
+        sample_x = cell_center_x + world_offset_x
+        sample_y = cell_center_y + world_offset_y
+
+        samples.append((sample_x, sample_y))
+
+    return samples
+
+
+def find_best_point_in_cell(robot_x, robot_y, env, cell_row, cell_col, pts, cells_no_step):
+    """
+    Sample 20 random points in a cell and find the one with clear path that is farthest from robot.
+
+    Args:
+        robot_x, robot_y: Current robot position
+        env: EnvironmentMap instance
+        cell_row, cell_col: Target cell coordinates
+        pts: Grid points array from local grid
+        cells_no_step: Cell values from local grid
+
+    Returns:
+        tuple: (best_x, best_y, valid_samples, rejected_samples) or (None, None, [], []) if no valid point found
+    """
+    # Sample random points in the cell
+    sampled_points = sample_cell_points(env, cell_row, cell_col, num_samples=20)
+
+    if not sampled_points:
+        return None, None, [], []
+
+    valid_samples = []
+    rejected_samples = []
+
+    # Check each sampled point
+    for sample_x, sample_y in sampled_points:
+        # Check if path is clear
+        if check_line_of_sight(robot_x, robot_y, sample_x, sample_y, pts, cells_no_step):
+            valid_samples.append((sample_x, sample_y))
+        else:
+            rejected_samples.append((sample_x, sample_y))
+
+    # If no valid samples, return None
+    if not valid_samples:
+        print(f"[WARNING] No clear path found to any sampled point in cell ({cell_row},{cell_col})")
+        return None, None, valid_samples, rejected_samples
+
+    # Choose the valid point that is FARTHEST from the robot
+    best_point = None
+    max_distance = -1
+
+    for sample_x, sample_y in valid_samples:
+        dist = np.sqrt((sample_x - robot_x)**2 + (sample_y - robot_y)**2)
+        if dist > max_distance:
+            max_distance = dist
+            best_point = (sample_x, sample_y)
+
+    print(f"[OK] Found {len(valid_samples)} valid points in cell ({cell_row},{cell_col}), chose farthest at {max_distance:.2f}m")
+
+    return best_point[0], best_point[1], valid_samples, rejected_samples
+
+
 def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
                                    candidates, chosen_point, iteration, env=None):
     """
     Visualize the no-step grid with sampled candidates and chosen point.
-    Optionally overlay global grid map.
+    Optionally overlay global grid map (only cells visible within local grid bounds).
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
@@ -286,7 +243,11 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
     colors_norm = color.astype(np.float32) / 255.0
     ax.scatter(x, y, c=colors_norm, s=2, alpha=0.4, label='Local Grid (obstacles)')
 
-    # Overlay global grid if provided
+    # Calculate local grid bounds
+    local_x_min, local_x_max = x.min(), x.max()
+    local_y_min, local_y_max = y.min(), y.max()
+
+    # Overlay global grid if provided (only cells within local grid bounds)
     if env is not None:
         for row in range(env.rows):
             for col in range(env.cols):
@@ -296,6 +257,13 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
                     continue
 
                 cell_x, cell_y = world_pos
+
+                # Check if cell is within local grid bounds (with small margin)
+                margin = env.cell_size
+                if not (local_x_min - margin <= cell_x <= local_x_max + margin and
+                       local_y_min - margin <= cell_y <= local_y_max + margin):
+                    continue  # Skip cells outside local grid view
+
                 half_size = env.cell_size / 2.0
 
                 # Calculate corners in grid frame
@@ -353,14 +321,8 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
         ax.plot([robot_x, chosen_point[0]], [robot_y, chosen_point[1]],
                 'g--', linewidth=2.5, alpha=0.8, zorder=4)
 
-    # Draw robot position and orientation
+    # Draw robot position
     ax.plot(robot_x, robot_y, 'bo', markersize=18, label='Robot', zorder=7)
-
-    # Draw robot orientation arrow
-    arrow_length = 0.3
-    ax.arrow(robot_x, robot_y, arrow_length, 0,
-            head_width=0.15, head_length=0.1, fc='blue', ec='blue',
-            linewidth=2, zorder=7)
 
     # Add distance circles
     for r in [1.0, 2.0]:
@@ -368,6 +330,10 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
                                linestyle=':', linewidth=1,
                                edgecolor='blue', alpha=0.3, zorder=1)
         ax.add_patch(circle)
+
+    # Set axis limits to focus on local grid
+    ax.set_xlim(local_x_min - 0.5, local_x_max + 0.5)
+    ax.set_ylim(local_y_min - 0.5, local_y_max + 0.5)
 
     ax.set_xlabel('X [m] (VISION)', fontsize=12, fontweight='bold')
     ax.set_ylabel('Y [m] (VISION)', fontsize=12, fontweight='bold')
@@ -449,15 +415,6 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
 
     target_row, target_col = target_cell
 
-    # Get world position for target cell (center of cell)
-    world_pos = env.get_world_position_from_cell(target_row, target_col)
-    if world_pos is None:
-        print(f"[ERROR] Failed to convert cell ({target_row},{target_col}) to world coordinates")
-        return False, next_index + 1, target_cell
-
-    target_x, target_y = world_pos
-    print(f"[INFO] Target world position: ({target_x:.2f}, {target_y:.2f})")
-
     # Get local grid to check obstacles
     proto = local_grid_client.get_local_grids(['no_step'])
     pts, cells_no_step, color = spotGrid.create_vtk_no_step_grid(proto, robot_state_client)
@@ -486,25 +443,21 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
 
     print(f"[INFO] Robot position: ({robot_x:.2f}, {robot_y:.2f})")
 
-    # Calculate distance and direction
-    dx = target_x - robot_x
-    dy = target_y - robot_y
-    distance = np.sqrt(dx**2 + dy**2)
 
-    print(f"[INFO] Distance to target: {distance:.2f}m")
+    # Sample 20 random points in the cell and find the best one with clear path
+    print(f"[INFO] Sampling 20 random points in cell ({target_row},{target_col})...")
+    target_x, target_y, valid_samples, rejected_samples = find_best_point_in_cell(
+        robot_x, robot_y, env, target_row, target_col, pts, cells_no_step
+    )
 
-    # Check if path is clear
-    path_clear = check_line_of_sight(robot_x, robot_y, target_x, target_y,
-                                     pts, cells_no_step)
-
-    if not path_clear:
-        print(f"[WARNING] Path to cell ({target_row},{target_col}) is BLOCKED")
+    if target_x is None or target_y is None:
+        print(f"[WARNING] No clear path to cell ({target_row},{target_col})")
         print(f"[INFO] Looking for next free cell with lower index in path...")
 
         # Visualize the blocked path
         visualize_grid_with_candidates(
             pts, cells_no_step, color, robot_x, robot_y,
-            {'rejected': [(target_x, target_y)], 'valid': []},
+            {'rejected': rejected_samples, 'valid': []},
             None, next_index, env
         )
 
@@ -520,60 +473,43 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
             if env.get_cell_status(alt_row, alt_col) == 1:
                 continue
 
-            # Skip if already attempted
-            if alt_cell in attempted_cells:
-                continue
+            # Try to find a valid point in this alternative cell
+            alt_x, alt_y, alt_valid, alt_rejected = find_best_point_in_cell(
+                robot_x, robot_y, env, alt_row, alt_col, pts, cells_no_step
+            )
 
-            # Check if this cell has a clear path
-            alt_world_pos = env.get_world_position_from_cell(alt_row, alt_col)
-            if alt_world_pos is None:
-                continue
-
-            alt_x, alt_y = alt_world_pos
-            alt_path_clear = check_line_of_sight(robot_x, robot_y, alt_x, alt_y, pts, cells_no_step)
-
-            if alt_path_clear:
+            if alt_x is not None and alt_y is not None:
                 # Found a reachable alternative!
                 alternative_cell = alt_cell
-                alternative_index = i
                 print(f"[INFO] Found alternative free cell: {alt_cell} at index {i}")
+                target_x = alt_x
+                target_y = alt_y
+                target_row = alt_row
+                target_col = alt_col
+                valid_samples = alt_valid
+                rejected_samples = alt_rejected
+                next_index = i
                 break
             else:
-                navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command_client, env, recording_interface, alt_world_pos)
-                break
-
+                return False, next_index + 1, alt_cell
 
         if alternative_cell is None:
             print(f"[WARNING] No free cells found ahead, will mark {target_cell} as unreachable")
             return False, next_index + 1, target_cell
 
-        # Navigate to alternative cell via waypoint
-        print(f"[INFO] Using graph navigation to reach alternative cell {alternative_cell}...")
+    print(f"[OK] Target point in cell ({target_row},{target_col}): ({target_x:.2f}, {target_y:.2f})")
 
-        nav_success, _ = navigate_to_cell_via_waypoint(
-            local_grid_client,
-            robot_state_client,
-            command_client,
-            env,
-            recording_interface,
-            alternative_cell
-        )
+    # Calculate distance and direction
+    dx = target_x - robot_x
+    dy = target_y - robot_y
+    distance = np.sqrt(dx ** 2 + dy ** 2)
 
-        if nav_success:
-            print(f"[OK] Successfully reached alternative cell {alternative_cell} via waypoint!")
-            # Return success and update index to alternative cell
-            return True, alternative_index + 1, alternative_cell
-        else:
-            print(f"[ERROR] Failed to reach alternative cell {alternative_cell} via waypoint")
-            # Mark both original and alternative as unreachable
-            return False, alternative_index + 1, alternative_cell
+    print(f"[INFO] Distance to target: {distance:.2f}m")
 
-    print(f"[OK] Path to cell ({target_row},{target_col}) is CLEAR")
-
-    # Visualize target
+    # Visualize target with sampled points
     visualize_grid_with_candidates(
         pts, cells_no_step, color, robot_x, robot_y,
-        {'rejected': [], 'valid': [(target_x, target_y)]},
+        {'rejected': rejected_samples, 'valid': valid_samples},
         (target_x, target_y), next_index, env
     )
 
@@ -637,7 +573,7 @@ def easy_walk(options):
         recordingInterface.start_recording()
         resp = recordingInterface.create_default_waypoint()
 
-        env = environmentMap.EnvironmentMap(rows=3, cols=3, cell_size=0.5)
+        env = environmentMap.EnvironmentMap(rows=3, cols=3, cell_size=1)
         x_boot, y_boot, z_boot, quat_boot = spotUtils.getPosition(robot_state_client)
 
         yaw_boot = np.arctan2(2.0 * (quat_boot.w * quat_boot.z + quat_boot.x * quat_boot.y),
@@ -661,12 +597,8 @@ def easy_walk(options):
         # Track cells that were attempted but couldn't be reached
         attempted_cells = set()
         cell_attempt_count = {}  # Track how many times we tried each cell
-        max_attempts_per_cell = 3  # Give up on a cell after this many failures
-
         # Follow the serpentine path
         current_path_index = 0
-        consecutive_failures = 0
-        max_consecutive_failures = 5
 
         while current_path_index < len(path):
             print(f"\n{'#'*70}")
@@ -709,6 +641,7 @@ def easy_walk(options):
                     print(f"[OK] Cell {target_cell} successfully explored and marked!")
 
                 # Create waypoint
+                recordingInterface.get_recording_status()
                 recordingInterface.create_default_waypoint()
                 print(f"[OK] Waypoint created at cell {target_cell}")
 
@@ -719,21 +652,10 @@ def easy_walk(options):
                     print("[INFO] All reachable cells have been explored!")
                     break
 
-                consecutive_failures += 1
-                print(f"[WARNING] Failed to reach cell {target_cell} (consecutive failures: {consecutive_failures}/{max_consecutive_failures})")
-
-                # Track failed attempt for this cell
-                if target_cell:
-                    if target_cell not in cell_attempt_count:
-                        cell_attempt_count[target_cell] = 0
-                    cell_attempt_count[target_cell] += 1
-
-                    print(f"[TRACK] Cell {target_cell}: attempt {cell_attempt_count[target_cell]}/{max_attempts_per_cell}")
-
-                    # If we've tried too many times, give up on this cell
-                    if cell_attempt_count[target_cell] >= max_attempts_per_cell:
-                        attempted_cells.add(target_cell)
-                        print(f"[SKIP] Cell {target_cell} marked as unreachable after {max_attempts_per_cell} attempts")
+                if target_cell is not None:
+                    recordingInterface.stop_recording()
+                    navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command_client, env, recordingInterface, target_cell)
+                    recordingInterface.start_recording()
 
         # Print final exploration statistics
         print(f"\n{'='*70}")
@@ -749,6 +671,7 @@ def easy_walk(options):
 
         recordingInterface.create_default_waypoint()
         recordingInterface.get_recording_status()
+        recordingInterface.create_new_edge()
 
         # --- END OF SIMPLE MISSION ---
 

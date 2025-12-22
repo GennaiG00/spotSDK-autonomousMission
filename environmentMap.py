@@ -40,7 +40,7 @@ class EnvironmentMap(object):
     def update_position(self, x, y):
         """
         Update the map based on new world coordinates.
-        Calculates which cell the robot is in and marks it as visited.
+        Marks cell as visited only when robot center is inside the cell boundaries.
         Coordinates are rotated to align with the robot's initial orientation.
 
         Args:
@@ -62,23 +62,42 @@ class EnvironmentMap(object):
         grid_x = delta_x * cos_yaw - delta_y * sin_yaw
         grid_y = delta_x * sin_yaw + delta_y * cos_yaw
 
-        # Convert to grid coordinates
+        # Convert to grid coordinates by checking which cell contains the robot center
         # Grid: X -> columns (right), Y -> rows (forward)
-        col = self.start_cell[1] + int(grid_x / self.cell_size)
-        row = self.start_cell[0] + int(grid_y / self.cell_size)
+        # Find the cell index by checking boundaries
+        half_size = self.cell_size / 2.0
 
-        # Check bounds
-        if 0 <= row < self.rows and 0 <= col < self.cols:
-            # Mark cell as visited if not already
-            if self.map[row][col] == 0:
-                self.map[row][col] = 1
-                print(f"[MAP] Cell ({row}, {col}) marked as visited")
+        # Calculate which cell the robot center is in
+        col = None
+        row = None
 
-            self.current_cell = (row, col)
-            return (row, col)
-        else:
-            print(f"[WARNING] Position ({x:.2f}, {y:.2f}) -> grid ({grid_x:.2f}, {grid_y:.2f}) is out of map bounds")
-            return None
+        for c in range(self.cols):
+            cell_center_x = (c - self.start_cell[1]) * self.cell_size
+            if abs(grid_x - cell_center_x) <= half_size:
+                col = c
+                break
+
+        for r in range(self.rows):
+            cell_center_y = (r - self.start_cell[0]) * self.cell_size
+            if abs(grid_y - cell_center_y) <= half_size:
+                row = r
+                break
+
+        # Check if we found a valid cell
+        if row is not None and col is not None:
+            # Check bounds (should always be true if above logic is correct)
+            if 0 <= row < self.rows and 0 <= col < self.cols:
+                # Mark cell as visited if not already
+                if self.map[row][col] == 0:
+                    self.map[row][col] = 1
+                    print(f"[MAP] Cell ({row}, {col}) marked as visited (robot center inside)")
+
+                self.current_cell = (row, col)
+                return (row, col)
+
+        # Robot center is not inside any cell (between cells or out of bounds)
+        print(f"[INFO] Robot center at ({x:.2f}, {y:.2f}) -> grid ({grid_x:.2f}, {grid_y:.2f}) is between cells or out of bounds")
+        return None
 
     def get_cell_from_world(self, x, y):
         """

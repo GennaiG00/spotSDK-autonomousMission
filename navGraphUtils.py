@@ -283,74 +283,12 @@ class RecordingInterface(object):
         travel_params = TravelParams()
         travel_params.lost_detector_strictness = 2
 
-
-
         while not is_finished:
             nav_to_cmd_id = self._graph_nav_client.navigate_to(first_waypoint.id, 1.0, command_id=nav_to_cmd_id)
             time.sleep(.5)  # Sleep for half a second to allow for command execution.
             is_finished = self._check_success(nav_to_cmd_id)
 
         print("[OK] Arrived at first waypoint")
-        return True
-
-    def navigate_to_previous_waypoint(self, steps_back=3):
-        """
-        Navigate back to a previous waypoint (n steps back from the last recorded waypoint).
-
-        This is used when the robot's native collision avoidance fails and we want to retry
-        with custom obstacle avoidance logic.
-
-        Args:
-            steps_back: Number of waypoints to go back (default 3-4 for safety margin)
-
-        Returns:
-            bool: True if navigation succeeded, False otherwise
-        """
-        graph = self._graph_nav_client.download_graph()
-
-        if not graph or len(graph.waypoints) == 0:
-            print('[WARNING] No waypoints found in the graph.')
-            return False
-
-        # Sort waypoints by name (assuming they are named waypoint_0, waypoint_1, etc.)
-        sorted_waypoints = sorted(graph.waypoints, key=lambda wp: wp.annotations.name)
-
-        # Find the target waypoint (steps_back from the end)
-        total_waypoints = len(sorted_waypoints)
-
-        if total_waypoints <= steps_back:
-            # If we don't have enough waypoints, go back to the first one
-            target_index = 0
-            print(f'[WARNING] Not enough waypoints to go back {steps_back} steps. Going to first waypoint instead.')
-        else:
-            # Go back steps_back waypoints from the last one
-            target_index = total_waypoints - steps_back - 1
-
-        target_waypoint = sorted_waypoints[target_index]
-        target_name = target_waypoint.annotations.name
-
-        print(f"[INFO] Navigating back to previous waypoint: {target_name} (going back {steps_back} waypoints)")
-        print(f"   Total waypoints in graph: {total_waypoints}")
-        print(f"   Target waypoint index: {target_index}")
-
-        # Navigate to the target waypoint
-        nav_to_cmd_id = None
-        is_finished = False
-
-        while not is_finished:
-            try:
-                nav_to_cmd_id = self._graph_nav_client.navigate_to(
-                    target_waypoint.id, 1.0, command_id=nav_to_cmd_id
-                )
-            except Exception as e:
-                print(f'[ERROR] Error while navigating to {target_name}: {e}')
-                return False
-
-            time.sleep(.5)  # Sleep for half a second to allow for command execution.
-            is_finished = self._check_success(nav_to_cmd_id)
-
-        print('[OK] Arrived at waypoint {0}'.format(target_name))
-        print('[INFO] Ready to retry with custom obstacle avoidance')
         return True
 
     def get_waypoint_list(self):
@@ -376,24 +314,18 @@ class RecordingInterface(object):
         Returns:
             bool: True if navigation succeeded, False otherwise
         """
+        self._graph_nav_client.download_graph()
+
         nav_to_cmd_id = None
         is_finished = False
 
         print(f"[NAV] Navigating to waypoint ID: {waypoint_id}")
+        travel_params = TravelParams()
+        travel_params.lost_detector_strictness = 2
 
         while not is_finished:
-            try:
-                self.stop_recording()
-                self.download_full_graph()
-                nav_to_cmd_id = self._graph_nav_client.navigate_to(
-                    waypoint_id, timeout, command_id=nav_to_cmd_id
-                )
-                self.start_recording()
-            except Exception as e:
-                print(f'[ERROR] Error while navigating to waypoint: {e}')
-                return False
-
-            time.sleep(.5)  # Sleep for half a second to allow for command execution
+            nav_to_cmd_id = self._graph_nav_client.navigate_to(waypoint_id, 1.0, command_id=nav_to_cmd_id)
+            time.sleep(.5)  # Sleep for half a second to allow for command execution.
             is_finished = self._check_success(nav_to_cmd_id)
 
         print(f'[OK] Arrived at waypoint {waypoint_id}')
