@@ -177,7 +177,7 @@ def sample_cell_points(env, cell_row, cell_col, num_samples=20):
 
 def find_best_point_in_cell(robot_x, robot_y, env, cell_row, cell_col, pts, cells_no_step):
     """
-    Sample 20 random points in a cell and find the one with clear path that is farthest from robot.
+    Sample 20 random points in a cell and find the one with clear path that is closest to cell center.
 
     Args:
         robot_x, robot_y: Current robot position
@@ -195,6 +195,13 @@ def find_best_point_in_cell(robot_x, robot_y, env, cell_row, cell_col, pts, cell
     if not sampled_points:
         return None, None, [], []
 
+    # Get cell center coordinates
+    cell_center = env.get_world_position_from_cell(cell_row, cell_col)
+    if cell_center is None:
+        return None, None, [], []
+
+    cell_center_x, cell_center_y = cell_center
+
     valid_samples = []
     rejected_samples = []
 
@@ -211,19 +218,80 @@ def find_best_point_in_cell(robot_x, robot_y, env, cell_row, cell_col, pts, cell
         print(f"[WARNING] No clear path found to any sampled point in cell ({cell_row},{cell_col})")
         return None, None, valid_samples, rejected_samples
 
-    # Choose the valid point that is FARTHEST from the robot
+    # Choose the valid point that is CLOSEST to the cell center
     best_point = None
-    max_distance = -1
+    min_distance = float('inf')
 
     for sample_x, sample_y in valid_samples:
-        dist = np.sqrt((sample_x - robot_x)**2 + (sample_y - robot_y)**2)
-        if dist > max_distance:
-            max_distance = dist
+        dist = np.sqrt((sample_x - cell_center_x)**2 + (sample_y - cell_center_y)**2)
+        if dist < min_distance:
+            min_distance = dist
             best_point = (sample_x, sample_y)
 
-    print(f"[OK] Found {len(valid_samples)} valid points in cell ({cell_row},{cell_col}), chose farthest at {max_distance:.2f}m")
+    print(f"[OK] Found {len(valid_samples)} valid points in cell ({cell_row},{cell_col}), chose closest to center at {min_distance:.2f}m from center")
 
     return best_point[0], best_point[1], valid_samples, rejected_samples
+
+
+def draw_explored_sides(ax, cell_x, cell_y, half_size, sides_status, cos_yaw, sin_yaw):
+    """
+    Draw red lines on the edges of a cell to show which sides have been explored.
+
+    Args:
+        ax: Matplotlib axis object
+        cell_x, cell_y: Center coordinates of the cell
+        half_size: Half of the cell size
+        sides_status: 4-bit value representing explored sides
+        cos_yaw, sin_yaw: Rotation parameters for coordinate transformation
+    """
+    if sides_status == 0b0000:
+        return  # Nothing to draw
+
+    edge_inset = 0.05  # Small inset to make lines visible
+
+    # North edge (top) - Bit 3: 0b1000
+    if sides_status & 0b1000:
+        north_start = (-half_size + edge_inset, half_size)
+        north_end = (half_size - edge_inset, half_size)
+        # Rotate to world frame
+        ns_wx = cell_x + (north_start[0] * cos_yaw - north_start[1] * sin_yaw)
+        ns_wy = cell_y + (north_start[0] * sin_yaw + north_start[1] * cos_yaw)
+        ne_wx = cell_x + (north_end[0] * cos_yaw - north_end[1] * sin_yaw)
+        ne_wy = cell_y + (north_end[0] * sin_yaw + north_end[1] * cos_yaw)
+        ax.plot([ns_wx, ne_wx], [ns_wy, ne_wy], 'r-', linewidth=4, alpha=0.8, zorder=4)
+
+    # East edge (right) - Bit 2: 0b0100
+    if sides_status & 0b0100:
+        east_start = (half_size, -half_size + edge_inset)
+        east_end = (half_size, half_size - edge_inset)
+        # Rotate to world frame
+        es_wx = cell_x + (east_start[0] * cos_yaw - east_start[1] * sin_yaw)
+        es_wy = cell_y + (east_start[0] * sin_yaw + east_start[1] * cos_yaw)
+        ee_wx = cell_x + (east_end[0] * cos_yaw - east_end[1] * sin_yaw)
+        ee_wy = cell_y + (east_end[0] * sin_yaw + east_end[1] * cos_yaw)
+        ax.plot([es_wx, ee_wx], [es_wy, ee_wy], 'r-', linewidth=4, alpha=0.8, zorder=4)
+
+    # South edge (bottom) - Bit 1: 0b0010
+    if sides_status & 0b0010:
+        south_start = (-half_size + edge_inset, -half_size)
+        south_end = (half_size - edge_inset, -half_size)
+        # Rotate to world frame
+        ss_wx = cell_x + (south_start[0] * cos_yaw - south_start[1] * sin_yaw)
+        ss_wy = cell_y + (south_start[0] * sin_yaw + south_start[1] * cos_yaw)
+        se_wx = cell_x + (south_end[0] * cos_yaw - south_end[1] * sin_yaw)
+        se_wy = cell_y + (south_end[0] * sin_yaw + south_end[1] * cos_yaw)
+        ax.plot([ss_wx, se_wx], [ss_wy, se_wy], 'r-', linewidth=4, alpha=0.8, zorder=4)
+
+    # West edge (left) - Bit 0: 0b0001
+    if sides_status & 0b0001:
+        west_start = (-half_size, -half_size + edge_inset)
+        west_end = (-half_size, half_size - edge_inset)
+        # Rotate to world frame
+        ws_wx = cell_x + (west_start[0] * cos_yaw - west_start[1] * sin_yaw)
+        ws_wy = cell_y + (west_start[0] * sin_yaw + west_start[1] * cos_yaw)
+        we_wx = cell_x + (west_end[0] * cos_yaw - west_end[1] * sin_yaw)
+        we_wy = cell_y + (west_end[0] * sin_yaw + west_end[1] * cos_yaw)
+        ax.plot([ws_wx, we_wx], [ws_wy, we_wy], 'r-', linewidth=4, alpha=0.8, zorder=4)
 
 
 def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
@@ -285,7 +353,7 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
                     world_corners.append((wx, wy))
 
                 # Draw cell
-                cell_status = env.get_cell_status(row, col)
+                cell_status, _ = env.get_cell_status(row, col)
                 if cell_status == 1:
                     # Visited - green fill
                     rect = patches.Polygon(world_corners, linewidth=2, edgecolor='darkgreen',
@@ -300,6 +368,13 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
                 ax.text(cell_x, cell_y, f'{row},{col}', ha='center', va='center',
                        fontsize=7, color='black', weight='bold', zorder=3,
                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+
+                # Draw explored sides as RED LINES on cell borders (only if cell not visited)
+                cell_status, sides_status = env.get_cell_status(row, col)
+                if cell_status == 0 and sides_status != 0b0000:
+                    draw_explored_sides(ax, cell_x, cell_y, half_size, sides_status, cos_yaw, sin_yaw)
+                if cell_status == 1 and sides_status != 0b1111:
+                    draw_explored_sides(ax, cell_x, cell_y, half_size, sides_status, cos_yaw, sin_yaw)
 
     # Plot rejected candidates (red X)
     if 'rejected' in candidates:
@@ -320,6 +395,18 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
         # Draw line from robot to chosen point
         ax.plot([robot_x, chosen_point[0]], [robot_y, chosen_point[1]],
                 'g--', linewidth=2.5, alpha=0.8, zorder=4)
+
+    # Draw waypoints if available
+    if env is not None and hasattr(env, 'waypoints') and env.waypoints:
+        for i, (wp_x, wp_y) in enumerate(env.waypoints):
+            # Check if waypoint is within local grid bounds
+            if (local_x_min - 0.5 <= wp_x <= local_x_max + 0.5 and
+                local_y_min - 0.5 <= wp_y <= local_y_max + 0.5):
+                ax.plot(wp_x, wp_y, 'mo', markersize=8, markerfacecolor='magenta',
+                       markeredgewidth=1.5, markeredgecolor='purple', zorder=6,
+                       label='Waypoints' if i == 0 else '')
+                ax.text(wp_x + 0.1, wp_y + 0.1, f'W{i+1}', fontsize=6, color='purple',
+                       weight='bold', zorder=6)
 
     # Draw robot position
     ax.plot(robot_x, robot_y, 'bo', markersize=18, label='Robot', zorder=7)
@@ -343,7 +430,7 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
         visited = sum(sum(row) for row in env.map)
         total = env.rows * env.cols
         title += f'Global Grid: {visited}/{total} cells visited | '
-    title += 'Yellow=valid | Red X=blocked | Green star=target'
+    title += 'Yellow=valid | Red X=blocked | Green star=target | Red lines=explored sides'
 
     ax.set_title(title, fontsize=13, fontweight='bold')
     ax.axis('equal')
@@ -392,7 +479,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
         row, col = cell
 
         # Check if already visited
-        cell_status = env.get_cell_status(row, col)
+        cell_status, _ = env.get_cell_status(row, col)
 
         # Check if previously failed
         if cell in attempted_cells:
@@ -470,7 +557,8 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
             alt_row, alt_col = alt_cell
 
             # Skip if already visited
-            if env.get_cell_status(alt_row, alt_col) == 1:
+            empty, _ = env.get_cell_status(alt_row, alt_col)
+            if empty == 1:
                 continue
 
             # Try to find a valid point in this alternative cell
@@ -551,6 +639,128 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
         return False, next_index + 1, target_cell
 
 
+def attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client,
+                                      env, target_row, target_col):
+    """
+    Attempt to enter a target cell from the current robot position.
+
+    This method:
+    1. Gets the local grid
+    2. Samples 20 random points in the target cell
+    3. Finds the best point (closest to center) with clear line of sight
+    4. If found, moves the robot to that point
+    5. Returns success/failure
+
+    Args:
+        local_grid_client: Client for local grid
+        robot_state_client: Client for robot state
+        command_client: Client for robot commands
+        env: EnvironmentMap instance
+        target_row: Row of target cell to enter
+        target_col: Column of target cell to enter
+
+    Returns:
+        bool: True if successfully entered cell, False otherwise
+    """
+    print(f"\n[ATTEMPT] Trying to enter cell ({target_row},{target_col}) from current position...")
+
+    # Get local grid to check obstacles
+    proto = local_grid_client.get_local_grids(['no_step'])
+    pts, cells_no_step, color = spotGrid.create_vtk_no_step_grid(proto, robot_state_client)
+
+    # Get grid proto
+    local_grid_proto = None
+    for local_grid_found in proto:
+        if local_grid_found.local_grid_type_name == 'no_step':
+            local_grid_proto = local_grid_found
+            break
+
+    if local_grid_proto is None:
+        print("[ERROR] No 'no_step' grid found")
+        return False
+
+    transforms_snapshot = local_grid_proto.local_grid.transforms_snapshot
+
+    # Get robot position
+    vision_tform_body = get_a_tform_b(
+        transforms_snapshot,
+        VISION_FRAME_NAME,
+        BODY_FRAME_NAME
+    )
+    robot_x = vision_tform_body.position.x
+    robot_y = vision_tform_body.position.y
+
+    print(f"[INFO] Robot position: ({robot_x:.2f}, {robot_y:.2f})")
+
+    # Sample 20 random points in the target cell and find the best one with clear path
+    print(f"[INFO] Sampling 20 random points in cell ({target_row},{target_col})...")
+    target_x, target_y, valid_samples, rejected_samples = find_best_point_in_cell(
+        robot_x, robot_y, env, target_row, target_col, pts, cells_no_step
+    )
+
+    if target_x is None or target_y is None:
+        print(f"[FAIL] No clear path found to cell ({target_row},{target_col}) from current position")
+
+        # Visualize the blocked path
+        visualize_grid_with_candidates(
+            pts, cells_no_step, color, robot_x, robot_y,
+            {'rejected': rejected_samples, 'valid': []},
+            None, 0, env
+        )
+
+        return False
+
+    print(f"[OK] Target point in cell ({target_row},{target_col}): ({target_x:.2f}, {target_y:.2f})")
+
+    # Calculate distance and direction
+    dx = target_x - robot_x
+    dy = target_y - robot_y
+    distance = np.sqrt(dx ** 2 + dy ** 2)
+
+    print(f"[INFO] Distance to target: {distance:.2f}m")
+
+    # Visualize target with sampled points
+    visualize_grid_with_candidates(
+        pts, cells_no_step, color, robot_x, robot_y,
+        {'rejected': rejected_samples, 'valid': valid_samples},
+        (target_x, target_y), 0, env
+    )
+
+    # Calculate yaw to face the target
+    target_yaw = np.arctan2(dy, dx)
+
+    # Get current yaw
+    quat = vision_tform_body.rotation
+    current_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y),
+                             1.0 - 2.0 * (quat.y**2 + quat.z**2))
+
+    # Calculate rotation needed
+    dyaw = target_yaw - current_yaw
+    dyaw = np.arctan2(np.sin(dyaw), np.cos(dyaw))  # Normalize to [-π, π]
+
+    print(f"[INFO] Required rotation: {np.rad2deg(dyaw):.1f}°")
+
+    # First rotate to face target
+    print("[INFO] Step 1: Rotating to face target...")
+    success_rot = movements.relative_move(0, 0, dyaw, "vision",
+                                         command_client, robot_state_client)
+
+
+    time.sleep(0.5)
+
+    # Then move forward
+    print(f"[INFO] Step 2: Moving forward {distance:.2f}m...")
+    success_move = movements.relative_move(distance, 0, 0, "vision",
+                                          command_client, robot_state_client)
+
+    if success_move:
+        print(f"[SUCCESS] Successfully entered cell ({target_row},{target_col})!")
+        return True
+    else:
+        print(f"[FAIL] Failed to enter cell ({target_row},{target_col})")
+        return False
+
+
 def easy_walk(options):
     robot, lease_client, robot_state_client, client_metadata = spotLogInUtils.setLogInfo(options)
 
@@ -581,6 +791,9 @@ def easy_walk(options):
 
         # Set origin with position AND orientation
         env.set_origin(x_boot, y_boot, yaw_boot, start_row=0, start_col=0)
+
+        # Register initial waypoint
+        env.add_waypoint(x_boot, y_boot)
 
         print(f'[INIT] Boot position: x={x_boot:.3f}, y={y_boot:.3f}, z={z_boot:.3f}')
         print(f'[INIT] Boot orientation: yaw={np.rad2deg(yaw_boot):.1f}°')
@@ -617,19 +830,28 @@ def easy_walk(options):
                 attempted_cells=attempted_cells
             )
 
+            if current_path_index > 0:
+                blocked_cells = env.get_blocked_neighbors_with_unexplored_side(path[current_path_index][0], path[current_path_index][1], path, current_path_index)
+                if blocked_cells is not None:
+                    for blocked_cell in blocked_cells:
+                        tmpRet = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client, env, blocked_cell[0], blocked_cell[1])
+                        if tmpRet:
+                            env.mark_cell_fully_explored(blocked_cell[0], blocked_cell[1])
+                        else:
+                            env.mark_explored_side(blocked_cell[0], blocked_cell[1], path[current_path_index][0], path[current_path_index][1])
+
+
             # Update path index
             current_path_index = next_index
 
             if success:
-                # Reset failure counter on success
-                consecutive_failures = 0
-
                 # Get new position
                 x, y, z, _ = spotUtils.getPosition(robot_state_client)
                 print(f'[POS] Current position: x={x:.3f}, y={y:.3f}')
                 print(f'[POS] Delta from boot: dx={x-x_boot:.3f}, dy={y-y_boot:.3f}')
 
                 # ONLY update map if movement was successful
+                # env.mark_cell_fully_explored(target_cell[0], target_cell[1])
                 cell = env.update_position(x, y)
                 env.print_map()
 
@@ -640,13 +862,59 @@ def easy_walk(options):
                         del cell_attempt_count[target_cell]
                     print(f"[OK] Cell {target_cell} successfully explored and marked!")
 
-                # Create waypoint
+                # Create waypoint and register its position
                 recordingInterface.get_recording_status()
                 recordingInterface.create_default_waypoint()
+                env.add_waypoint(x, y)  # Register waypoint in environment map
                 print(f"[OK] Waypoint created at cell {target_cell}")
 
                 time.sleep(1)
             else:
+                # Get current robot position
+                x, y, z, _ = spotUtils.getPosition(robot_state_client)
+                robot_cell = env.world_to_grid_cell(x, y)
+
+                if robot_cell:
+                    robot_row, robot_col = robot_cell
+
+                    # Mark explored side
+                    env.mark_explored_side(path, current_path_index-1, robot_row, robot_col)
+
+                    # Get visited neighbors with directional context (relative to movement)
+                    visited_neighbors = env.return_visited_cells_near_blocked(path, current_path_index-1, robot_row, robot_col)
+
+                    # Create list of positions to check: target_cell + all non-None neighbors
+                    position_to_check = []
+                    for direction, neighbor_cell in visited_neighbors.items():
+                        if neighbor_cell is not None and neighbor_cell != robot_cell:
+                            position_to_check.append(neighbor_cell)
+
+                    print(f"[INFO] Positions to check: {position_to_check}")
+
+                    for tmpCell in position_to_check:
+                        recordingInterface.stop_recording()
+                        navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command_client, env, recordingInterface, tmpCell)
+                        recordingInterface.start_recording()
+
+                        tmp_col, tmp_row = tmpCell
+                        #todo: devo cambiare questo in modo che vada dentro la casella bloccata e non quella vicino come fa ora
+                        free = attempt_enter_cell_from_position(
+                            local_grid_client, robot_state_client, command_client,
+                            env, tmp_row, tmp_col
+                        )
+
+                        if free is False:
+                            env.mark_explored_side(target_cell[0], target_cell[1], tmpCell[0], tmpCell[1])
+                        else:
+                            print(f"[OK] Successfully entered cell {target_cell} via neighbor {tmpCell}!")
+                            env.mark_cell_fully_explored(target_cell[0], target_cell[1])
+                            break
+                    # Check if we can navigate through a visited neighbor
+                    if any(visited_neighbors.values()):
+                        print(f"[INFO] Alternative navigation possible through visited neighbors")
+                else:
+                    print("[WARNING] Could not determine robot cell position")
+
                 # Check if we've exhausted the path
                 if target_cell is None:
                     print("[INFO] All reachable cells have been explored!")

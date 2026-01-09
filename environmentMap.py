@@ -11,7 +11,455 @@ class EnvironmentMap(object):
         self.origin_yaw = 0.0  # Initial yaw orientation of robot (radians)
         self.start_cell = (0, 0)  # Starting cell in grid coordinates
         self.current_cell = (0, 0)
+        # Track explored sides for each cell: key=(row,col), value=4-bit binary (NESW)
+        # Bit 3 (0b1000): North, Bit 2 (0b0100): East, Bit 1 (0b0010): South, Bit 0 (0b0001): West
+        self.explored_sides = {}
+        # Track waypoint positions: list of (x, y) world coordinates
+        self.waypoints = []
 
+    def mark_explored_side(self, path=None, target_index=None, robot_row=None, robot_col=None,
+                           target_row=None, target_col=None):
+        """
+        Mark which side of target cell was explored based on robot's approach direction.
+
+        Recommended usage:
+        - Use path + target_index for the TARGET cell (from serpentine path)
+        - Use robot_row/robot_col for ROBOT position (actual position from sensors)
+
+        Call patterns:
+        1. Path + target_index + robot position (recommended):
+           mark_explored_side(path=path, target_index=5, robot_row=1, robot_col=2)
+
+        2. Explicit coordinates only (backward compatible):
+           mark_explored_side(target_row=2, target_col=3, robot_row=1, robot_col=3)
+
+        Bit encoding:
+            North (↑) = 0b1000 (bit 3) = 8
+            East  (→) = 0b0100 (bit 2) = 4
+            South (↓) = 0b0010 (bit 1) = 2
+            West  (←) = 0b0001 (bit 0) = 1
+
+        The function automatically determines which side based on geometry:
+        - If robot is ABOVE target (lower row) → marks NORTH side
+        - If robot is BELOW target (higher row) → marks SOUTH side
+        - If robot is LEFT of target (lower col) → marks WEST side
+        - If robot is RIGHT of target (higher col) → marks EAST side
+
+        Args:
+            path: List of (row, col) tuples representing the serpentine path (optional)
+            target_index: Index in path of the target cell (optional)
+            robot_row: Row of the robot's current position (required)
+            robot_col: Column of the robot's current position (required)
+            target_row: Row of the target cell (optional, alternative to path/target_index)
+            target_col: Column of the target cell (optional, alternative to path/target_index)
+
+        Returns:
+            int: Updated sides value for the cell (4-bit binary)
+
+        Example:
+            # Using path + target_index + robot position (recommended)
+            mark_explored_side(path=path, target_index=5, robot_row=1, robot_col=2)
+
+            # Using explicit coordinates only
+            mark_explored_side(target_row=2, target_col=3, robot_row=2, robot_col=2)
+        """
+        # Extract target coordinates from path if provided
+        if path is not None and target_index is not None:
+            if 0 <= target_index < len(path):
+                target_row, target_col = path[target_index]
+                print(f"[PATH] Using target from path index {target_index}: ({target_row},{target_col})")
+            else:
+                print(f"[ERROR] Invalid target index: {target_index}, path_len={len(path)}")
+                return 0b0000
+
+        # Validate that we have all necessary coordinates
+        if target_row is None or target_col is None or robot_row is None or robot_col is None:
+            print(f"[ERROR] Missing coordinates: target=({target_row},{target_col}), robot=({robot_row},{robot_col})")
+            return 0b0000
+
+        print(f"[MARK] Target: ({target_row},{target_col}), Robot: ({robot_row},{robot_col})")
+
+        cell_key = (target_row, target_col)
+
+        # Initialize if not exists
+        if cell_key not in self.explored_sides:
+            self.explored_sides[cell_key] = 0b0000
+
+        # Calculate position difference
+        delta_row = target_row - robot_row  # Positive = robot is above, Negative = robot is below
+        delta_col = target_col - robot_col  # Positive = robot is left, Negative = robot is right
+
+        # Determine the primary direction (handle diagonal by choosing stronger component)
+        if abs(delta_row) > abs(delta_col):
+            # VERTICAL movement dominates
+            if delta_row <= 0:
+                # delta_row > 0 → target_row > robot_row → Robot is ABOVE (North of) target
+                # We're trying to enter from the NORTH side
+
+                side = 0b1000  # North (bit 3)
+                side_name = "North (↑)"
+            else:
+                # delta_row < 0 → target_row < robot_row → Robot is BELOW (South of) target
+                # We're trying to enter from the SOUTH side
+                side = 0b0010  # South (bit 1)
+                side_name = "South (↓)"
+        else:
+            # HORIZONTAL movement dominates or equal
+            if delta_col <= 0:
+                # delta_col > 0 → target_col > robot_col → Robot is LEFT (West of) target
+                # We're trying to enter from the WEST side
+                side = 0b0001  # West (bit 0)
+                side_name = "West (←)"
+            else:
+                # delta_col < 0 → target_col < robot_col → Robot is RIGHT (East of) target
+                # We're trying to enter from the EAST side
+                side = 0b0100  # East (bit 2)
+                side_name = "East (→)"
+
+        # Mark this side as explored using bitwise OR
+        self.explored_sides[cell_key] |= side
+
+        print(f"[SIDES] Cell ({target_row},{target_col}) - Marked {side_name} from ({robot_row},{robot_col}): {bin(side)} -> Total: {bin(self.explored_sides[cell_key])}")
+
+        return self.explored_sides[cell_key]
+
+    def mark_cell_fully_explored(self, row, col):
+        """
+        Mark a cell as fully explored (all 4 sides: 0b1111).
+
+        Args:
+            row: Row of the cell
+            col: Column of the cell
+        """
+        cell_key = (row, col)
+        self.explored_sides[cell_key] = 0b1111
+        print(f"[SIDES] Cell ({row},{col}) marked as FULLY explored (0b1111)")
+
+    def return_visited_cells_near_blocked(self, path=None, blocked_index=None, robot_row=None, robot_col=None,
+                                          blocked_row=None, blocked_col=None):
+        """
+        Return visited cells adjacent to a blocked cell relative to robot's movement direction.
+
+        Recommended usage:
+        - Use path + blocked_index for BLOCKED cell (from serpentine path)
+        - Use robot_row/robot_col for ROBOT position (to determine movement direction)
+
+        Directions are relative to robot's movement in serpentine pattern:
+        - North (avanti): direction robot is moving toward
+        - South (indietro): direction robot came from
+        - East (destra): right side relative to movement
+        - West (sinistra): left side relative to movement
+
+        Args:
+            path: List of (row, col) tuples representing the serpentine path (optional)
+            blocked_index: Index in path of the blocked cell (optional)
+            robot_row: Current robot row (to determine movement direction)
+            robot_col: Current robot column (to determine movement direction)
+            blocked_row: Row of the blocked cell (optional, alternative to path/blocked_index)
+            blocked_col: Column of the blocked cell (optional, alternative to path/blocked_index)
+
+        Returns:
+            dict: Dictionary with keys 'north', 'south', 'east', 'west'.
+                  Each value is either (row, col) tuple if that neighbor is visited,
+                  or None if not visited or out of bounds.
+
+        Example:
+            # Using path + blocked_index + robot position (recommended)
+            return_visited_cells_near_blocked(path=path, blocked_index=5, robot_row=1, robot_col=2)
+
+            # Using explicit coordinates
+            return_visited_cells_near_blocked(blocked_row=1, blocked_col=1, robot_row=1, robot_col=2)
+        """
+        # Extract blocked cell coordinates from path if provided
+        if path is not None and blocked_index is not None:
+            if 0 <= blocked_index < len(path):
+                blocked_row, blocked_col = path[blocked_index]
+                print(f"[PATH] Using blocked cell from path index {blocked_index}: ({blocked_row},{blocked_col})")
+            else:
+                print(f"[ERROR] Invalid blocked index: {blocked_index}, path_len={len(path)}")
+                return {'north': None, 'south': None, 'east': None, 'west': None}
+
+        # Validate that we have blocked cell coordinates
+        if blocked_row is None or blocked_col is None:
+            print(f"[ERROR] Missing blocked cell coordinates: ({blocked_row},{blocked_col})")
+            return {'north': None, 'south': None, 'east': None, 'west': None}
+        visited_neighbors = {
+            'north': None,  # Avanti
+            'south': None,  # Indietro
+            'east': None,   # Destra
+            'west': None    # Sinistra
+        }
+
+        # If robot position not provided, use absolute grid directions (backward compatibility)
+        if robot_row is None or robot_col is None:
+            print("[WARNING] Robot position not provided, using absolute grid directions")
+            directions = [
+                (-1, 0, 'north'),  # North: row - 1
+                (1, 0, 'south'),   # South: row + 1
+                (0, 1, 'east'),    # East: col + 1
+                (0, -1, 'west')    # West: col - 1
+            ]
+        else:
+            # Determine movement direction based on robot position relative to blocked cell
+            delta_row = blocked_row - robot_row
+            delta_col = blocked_col - robot_col
+
+            # Determine primary movement direction
+            if abs(delta_col) > abs(delta_row):
+                # Horizontal movement (left/right in serpentine)
+                if delta_row > 0:
+                    # Robot is LEFT of target, moving RIGHT (→)
+                    # North=avanti(→), South=indietro(←), East=destra(↓), West=sinistra(↑)
+                    directions = [
+                        (0, 1, 'north'),    # North (avanti): col + 1
+                        (0, -1, 'south'),   # South (indietro): col - 1
+                        (1, 0, 'east'),     # East (destra): row + 1
+                        (-1, 0, 'west')     # West (sinistra): row - 1
+                    ]
+                    print(f"[DIRECTION] Moving RIGHT (→): North=→, South=←, East=↓, West=↑")
+                else:
+                    # Robot is RIGHT of target, moving LEFT (←)
+                    # North=avanti(←), South=indietro(→), East=destra(↓), West=sinistra(↑)
+                    directions = [
+                        (0, -1, 'north'),   # North (avanti): col - 1
+                        (0, 1, 'south'),    # South (indietro): col + 1
+                        (1, 0, 'east'),     # East (destra): row + 1
+                        (-1, 0, 'west')     # West (sinistra): row - 1
+                    ]
+                    print(f"[DIRECTION] Moving LEFT (←): North=←, South=→, East=↓, West=↑")
+            else:
+                # Vertical movement (up/down in serpentine)
+                if delta_col > 0:
+                    # Robot is ABOVE target, moving DOWN (↓)
+                    # North=avanti(↓), South=indietro(↑), East=destra(→), West=sinistra(←)
+                    directions = [
+                        (1, 0, 'north'),    # North (avanti): row + 1
+                        (-1, 0, 'south'),   # South (indietro): row - 1
+                        (0, 1, 'east'),     # East (destra): col + 1
+                        (0, -1, 'west')     # West (sinistra): col - 1
+                    ]
+                    print(f"[DIRECTION] Moving DOWN (↓): North=↓, South=↑, East=→, West=←")
+                else:
+                    # Robot is BELOW target, moving UP (↑)
+                    # North=avanti(↑), South=indietro(↓), East=destra(→), West=sinistra(←)
+                    directions = [
+                        (-1, 0, 'north'),   # North (avanti): row - 1
+                        (1, 0, 'south'),    # South (indietro): row + 1
+                        (0, 1, 'east'),     # East (destra): col + 1
+                        (0, -1, 'west')     # West (sinistra): col - 1
+                    ]
+                    print(f"[DIRECTION] Moving UP (↑): North=↑, South=↓, East=→, West=←")
+
+        for dr, dc, direction in directions:
+            neighbor_row = blocked_row + dr
+            neighbor_col = blocked_col + dc
+
+            # Check if neighbor is within bounds
+            if 0 <= neighbor_row < self.rows and 0 <= neighbor_col < self.cols:
+                # Check if neighbor is visited
+                if self.map[neighbor_row][neighbor_col] == 1:
+                    visited_neighbors[direction] = (neighbor_row, neighbor_col)
+
+        # Print summary
+        visited_count = sum(1 for v in visited_neighbors.values() if v is not None)
+        print(f"[NEIGHBORS] Cell ({blocked_row},{blocked_col}) has {visited_count}/4 visited neighbors:")
+        for direction, cell in visited_neighbors.items():
+            if cell:
+                print(f"  {direction.capitalize()}: {cell} ✓")
+            else:
+                print(f"  {direction.capitalize()}: Not visited or out of bounds")
+
+        return visited_neighbors
+
+    def get_visited_neighbors_list(self, path=None, blocked_index=None, robot_row=None, robot_col=None,
+                                    blocked_row=None, blocked_col=None):
+        """
+        Return a simple list of visited neighbor cells (without None values).
+
+        Args:
+            path: List of (row, col) tuples representing the serpentine path (optional)
+            blocked_index: Index in path of the blocked cell (optional)
+            robot_row: Current robot row (optional, for directional context)
+            robot_col: Current robot column (optional, for directional context)
+            blocked_row: Row of the blocked cell (optional, alternative)
+            blocked_col: Column of the blocked cell (optional, alternative)
+
+        Returns:
+            list: List of (row, col) tuples of visited adjacent cells
+        """
+        neighbors_dict = self.return_visited_cells_near_blocked(
+            path=path, blocked_index=blocked_index,
+            robot_row=robot_row, robot_col=robot_col,
+            blocked_row=blocked_row, blocked_col=blocked_col
+        )
+        return [cell for cell in neighbors_dict.values() if cell is not None]
+
+    def get_blocked_neighbors_with_unexplored_side(self, cell_row, cell_col, path=None, path_index=None):
+        """
+        Find adjacent blocked cells that have been previously attempted (at least one side explored)
+        but have the side facing the input cell still unexplored.
+
+        This method checks all 4 neighbors of the input cell and returns those that are:
+        1. Blocked (not visited: map[row][col] == 0)
+        2. Previously attempted (have at least one side explored: sides != 0b0000)
+        3. Have the side facing the input cell NOT yet explored
+
+        Args:
+            cell_row: Row of the input cell (current position)
+            cell_col: Column of the input cell (current position)
+            path: List of (row, col) tuples representing the serpentine path (optional)
+            path_index: Current index in the path (optional, used with path to determine movement direction)
+
+        Returns:
+            list or None: List of (row, col) tuples of blocked neighbors with unexplored sides,
+                         or None if no such neighbors exist.
+        """
+        blocked_neighbors = []
+
+        # Calculate previous position from path if provided
+        prev_row = None
+        prev_col = None
+
+        if path is not None and path_index is not None and path_index > 0:
+            # Get previous cell from path
+            prev_cell = path[path_index - 1]
+            prev_row, prev_col = prev_cell
+            print(f"[PATH] Using path index {path_index}, prev cell: ({prev_row}, {prev_col})")
+
+        # If previous position available, use relative directions (like return_visited_cells_near_blocked)
+        if prev_row is not None and prev_col is not None:
+            # Determine movement direction
+            delta_row = cell_row - prev_row
+            delta_col = cell_col - prev_col
+
+            # Determine neighbor directions based on movement direction
+            if abs(delta_col) > abs(delta_row):
+                # Horizontal movement (left/right in serpentine)
+                if delta_col > 0:
+                    # Moving RIGHT (→)
+                    neighbors = [
+                        (0, 1, 'north_right', 0b0001),    # Avanti (col+1): check West side
+                        (0, -1, 'south_left', 0b0100),    # Indietro (col-1): check East side
+                        (1, 0, 'east_down', 0b1000),      # Destra (row+1): check North side
+                        (-1, 0, 'west_up', 0b0010)        # Sinistra (row-1): check South side
+                    ]
+                else:
+                    # Moving LEFT (←)
+                    neighbors = [
+                        (0, -1, 'north_left', 0b0100),    # Avanti (col-1): check East side
+                        (0, 1, 'south_right', 0b0001),    # Indietro (col+1): check West side
+                        (1, 0, 'east_down', 0b1000),      # Destra (row+1): check North side
+                        (-1, 0, 'west_up', 0b0010)        # Sinistra (row-1): check South side
+                    ]
+            else:
+                # Vertical movement (up/down in serpentine)
+                if delta_row > 0:
+                    # Moving DOWN (↓)
+                    neighbors = [
+                        (1, 0, 'north_down', 0b1000),     # Avanti (row+1): check North side
+                        (-1, 0, 'south_up', 0b0010),      # Indietro (row-1): check South side
+                        (0, 1, 'east_right', 0b0001),     # Destra (col+1): check West side
+                        (0, -1, 'west_left', 0b0100)      # Sinistra (col-1): check East side
+                    ]
+                else:
+                    # Moving UP (↑)
+                    neighbors = [
+                        (-1, 0, 'north_up', 0b0010),      # Avanti (row-1): check South side
+                        (1, 0, 'south_down', 0b1000),     # Indietro (row+1): check North side
+                        (0, 1, 'east_right', 0b0001),     # Destra (col+1): check West side
+                        (0, -1, 'west_left', 0b0100)      # Sinistra (col-1): check East side
+                    ]
+        else:
+            # Use absolute grid directions (backward compatibility)
+            neighbors = [
+                (-1, 0, 'north', 0b0010),  # North neighbor: check its South side
+                (1, 0, 'south', 0b1000),   # South neighbor: check its North side
+                (0, 1, 'east', 0b0001),    # East neighbor: check its West side
+                (0, -1, 'west', 0b0100)    # West neighbor: check its East side
+            ]
+
+        for dr, dc, direction, side_bit in neighbors:
+            neighbor_row = cell_row + dr
+            neighbor_col = cell_col + dc
+
+            # Check if neighbor is within bounds
+            if not (0 <= neighbor_row < self.rows and 0 <= neighbor_col < self.cols):
+                continue
+
+            # Check if neighbor is blocked (not visited)
+            if self.map[neighbor_row][neighbor_col] != 0:
+                continue  # Skip visited cells
+
+            # Get explored sides of the neighbor
+            neighbor_sides = self.get_cell_sides_status(neighbor_row, neighbor_col)
+
+            # CRITICAL: Only consider cells that have been previously attempted
+            # (have at least one side explored)
+            if neighbor_sides == 0b0000:
+                print(f"[SKIP] Cell ({neighbor_row},{neighbor_col}) - {direction} - Never attempted (sides=0b0000)")
+                continue  # Skip cells that have never been attempted
+
+            # Check if the side facing the input cell is NOT explored
+            if not (neighbor_sides & side_bit):
+                # This side is NOT explored yet, but other sides have been tried!
+                blocked_neighbors.append((neighbor_row, neighbor_col))
+                print(f"[BLOCKED] Cell ({neighbor_row},{neighbor_col}) - {direction} of ({cell_row},{cell_col}) - "
+                      f"Previously attempted (sides={bin(neighbor_sides)}) but side {bin(side_bit)} facing input NOT explored")
+            else:
+                print(f"[SKIP] Cell ({neighbor_row},{neighbor_col}) - {direction} - "
+                      f"Side {bin(side_bit)} facing input already explored (sides={bin(neighbor_sides)})")
+
+        if blocked_neighbors:
+            return blocked_neighbors
+        else:
+            print(f"[RESULT] No blocked neighbors with unexplored sides found for cell ({cell_row},{cell_col})")
+            return None
+
+    def get_cell_sides_status(self, row, col):
+        """
+        Get the exploration status of a cell's sides.
+
+        Args:
+            row: Row of the cell
+            col: Column of the cell
+
+        Returns:
+            int: 4-bit value representing explored sides (0b0000 to 0b1111)
+        """
+        cell_key = (row, col)
+        return self.explored_sides.get(cell_key, 0b0000)
+
+    def print_sides_status(self, row, col):
+        """
+        Print human-readable status of explored sides for a cell.
+
+        Args:
+            row: Row of the cell
+            col: Column of the cell
+        """
+        sides = self.get_cell_sides_status(row, col)
+
+        # Map bits to side names
+        sides_map = {
+            0b1000: "Nord (↑)",
+            0b0100: "Est (→)",
+            0b0010: "Sud (↓)",
+            0b0001: "Ovest (←)"
+        }
+
+        explored = [name for bit, name in sides_map.items() if sides & bit]
+
+        print(f"[SIDES] Cell ({row},{col})")
+        print(f"  Binary: {bin(sides)} | Decimal: {sides}")
+        print(f"  Explored sides: {', '.join(explored) if explored else 'None'}")
+        print(f"  Count: {bin(sides).count('1')}/4")
+
+        if sides == 0b1111:
+            print(f"  Status: FULLY EXPLORED (all sides attempted)")
+        elif sides == 0b0000:
+            print(f"  Status: UNEXPLORED (no attempts)")
+        else:
+            print(f"  Status: PARTIALLY EXPLORED")
     def set_origin(self, x, y, yaw=0.0, start_row=0, start_col=0):
         """
         Set the world coordinates (x, y, yaw) as the origin of the grid.
@@ -119,6 +567,13 @@ class EnvironmentMap(object):
 
         return (row, col)
 
+    def world_to_grid_cell(self, x, y):
+        """
+        Alias for get_cell_from_world for clearer semantics.
+        Convert world coordinates to grid cell without marking as visited.
+        """
+        return self.get_cell_from_world(x, y)
+
     def get_cell_status(self, row, col):
         """
         Get the status of a cell in the map.
@@ -128,11 +583,15 @@ class EnvironmentMap(object):
             col: Column index
 
         Returns:
-            int: Cell value (0=unvisited, 1=visited), or None if out of bounds
+            tuple: (cell_value, explored_sides) where cell_value is 0=unvisited or 1=visited,
+                   and explored_sides is the 4-bit value representing explored sides.
+                   Returns (None, None) if out of bounds.
         """
         if 0 <= row < self.rows and 0 <= col < self.cols:
-            return self.map[row][col]
-        return None
+            cell_value = self.map[row][col]
+            explored_sides = self.get_cell_sides_status(row, col)
+            return cell_value, explored_sides
+        return None, None
 
     def generate_serpentine_path(self):
         """
@@ -196,6 +655,17 @@ class EnvironmentMap(object):
             return (x, y)
         return None
 
+    def add_waypoint(self, x, y):
+        """
+        Register a waypoint at the given world coordinates.
+
+        Args:
+            x: World X coordinate
+            y: World Y coordinate
+        """
+        self.waypoints.append((x, y))
+        print(f"[WAYPOINT] Registered waypoint #{len(self.waypoints)} at ({x:.3f}, {y:.3f})")
+
     def print_map(self):
         """Print the current state of the map."""
         print("\n--- Environment Map ---")
@@ -204,4 +674,6 @@ class EnvironmentMap(object):
         if hasattr(self, 'current_cell'):
             print(f"Current cell: {self.current_cell}")
         print("-----------------------\n")
+
+
 
