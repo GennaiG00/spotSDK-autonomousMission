@@ -20,6 +20,8 @@ import spotLogInUtils
 import environmentMap
 import spotUtils
 
+#TODO: check if the we can avoid to set a sleep after each movement command
+
 def find_nearest_waypoint_to_cell(env, target_cell, recording_interface):
     """
     Find the nearest waypoint to a target cell.
@@ -89,7 +91,7 @@ def navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command
         return False, target_cell
 
     print(f"[OK] Reached waypoint {waypoint_id}")
-    time.sleep(1)
+    time.sleep(0.5)
 
     return True, target_cell
 
@@ -225,7 +227,7 @@ def find_best_point_in_cell(robot_x, robot_y, env, cell_row, cell_col, pts, cell
             min_distance = dist
             best_point = (sample_x, sample_y)
 
-    print(f"[OK] Found {len(valid_samples)} valid points in cell ({cell_row},{cell_col}), chose closest to center at {min_distance:.2f}m from center")
+    #print(f"[OK] Found {len(valid_samples)} valid points in cell ({cell_row},{cell_col}), chose closest to center at {min_distance:.2f}m from center")
 
     return best_point[0], best_point[1], valid_samples, rejected_samples
 
@@ -413,11 +415,12 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
             for i, waypoint in enumerate(env.waypoints):
                 if not isinstance(waypoint, (tuple, list)):
                     continue
-                if len(waypoint) >= 2:  # Ensure it's a valid tuple/list
-                    wp_x, wp_y = waypoint[0], waypoint[1]
-                    if (local_x_min - 0.5 <= wp_x <= local_x_max + 0.5 and
-                        local_y_min - 0.5 <= wp_y <= local_y_max + 0.5):
-                        visible_waypoints.append((wp_x, wp_y, i))
+                if type(waypoint) != int:
+                    if len(waypoint) >= 2:  # Ensure it's a valid tuple/list
+                        wp_x, wp_y = waypoint[0], waypoint[1]
+                        if (local_x_min - 0.5 <= wp_x <= local_x_max + 0.5 and
+                            local_y_min - 0.5 <= wp_y <= local_y_max + 0.5):
+                            visible_waypoints.append((wp_x, wp_y, i))
 
             # Draw lines connecting waypoints (in order)
             if type(visible_waypoints) != int:
@@ -449,14 +452,15 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
                     continue
 
                 # Handle both old format (x, y) and new format (x, y, movement_type)
-                if len(entry) >= 2:
-                    pos_x, pos_y = entry[0], entry[1]
-                    movement_type = entry[2] if len(entry) >= 3 else 'explore'
+                if type(entry) != int:
+                    if len(entry) >= 2:
+                        pos_x, pos_y = entry[0], entry[1]
+                        movement_type = entry[2] if len(entry) >= 3 else 'explore'
 
-                    # Check if within visible bounds
-                    if (local_x_min - 0.5 <= pos_x <= local_x_max + 0.5 and
-                        local_y_min - 0.5 <= pos_y <= local_y_max + 0.5):
-                        all_positions.append((pos_x, pos_y, movement_type))
+                        # Check if within visible bounds
+                        if (local_x_min - 0.5 <= pos_x <= local_x_max + 0.5 and
+                            local_y_min - 0.5 <= pos_y <= local_y_max + 0.5):
+                            all_positions.append((pos_x, pos_y, movement_type))
 
             # Draw traces connecting ALL robot positions in sequence
             if type(all_positions) != int:
@@ -604,9 +608,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
 
     # Sample 20 random points in the cell and find the best one with clear path
     print(f"[INFO] Sampling 20 random points in cell ({target_row},{target_col})...")
-    target_x, target_y, valid_samples, rejected_samples = find_best_point_in_cell(
-        robot_x, robot_y, env, target_row, target_col, pts, cells_no_step
-    )
+    target_x, target_y, valid_samples, rejected_samples = find_best_point_in_cell(robot_x, robot_y, env, target_row, target_col, pts, cells_no_step)
 
     if target_x is None or target_y is None:
         print(f"[WARNING] No clear path to cell ({target_row},{target_col})")
@@ -615,7 +617,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
         # Mark this cell as blocked (obstacle detected)
         env.mark_cell_blocked(target_row, target_col)
 
-        # Visualize the blocked path
+        #Visualize the blocked path
         visualize_grid_with_candidates(
             pts, cells_no_step, color, robot_x, robot_y,
             {'rejected': rejected_samples, 'valid': []},
@@ -631,14 +633,12 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
             alt_row, alt_col = alt_cell
 
             # Skip if already visited
-            empty, _ = env.get_cell_status(alt_row, alt_col)
-            if empty == 1:
+            full, _ = env.get_cell_status(alt_row, alt_col)
+            if full == 1:
                 continue
 
             # Try to find a valid point in this alternative cell
-            alt_x, alt_y, alt_valid, alt_rejected = find_best_point_in_cell(
-                robot_x, robot_y, env, alt_row, alt_col, pts, cells_no_step
-            )
+            alt_x, alt_y, alt_valid, alt_rejected = find_best_point_in_cell(robot_x, robot_y, env, alt_row, alt_col, pts, cells_no_step)
 
             if alt_x is not None and alt_y is not None:
                 # Found a reachable alternative!
@@ -668,7 +668,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
 
     print(f"[INFO] Distance to target: {distance:.2f}m")
 
-    # Visualize target with sampled points
+    #Visualize target with sampled points
     visualize_grid_with_candidates(
         pts, cells_no_step, color, robot_x, robot_y,
         {'rejected': rejected_samples, 'valid': valid_samples},
@@ -698,7 +698,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
         print("[ERROR] Failed to rotate")
         return False, next_index + 1, target_cell
 
-    time.sleep(0.5)
+    time.sleep(0.2)
 
     # Then move forward
     print(f"[INFO] Step 2: Moving forward {distance:.2f}m...")
@@ -793,7 +793,7 @@ def attempt_enter_cell_from_position(local_grid_client, robot_state_client, comm
 
     print(f"[INFO] Distance to target: {distance:.2f}m")
 
-    # Visualize target with sampled points
+    #Visualize target with sampled points
     visualize_grid_with_candidates(
         pts, cells_no_step, color, robot_x, robot_y,
         {'rejected': rejected_samples, 'valid': valid_samples},
@@ -820,7 +820,7 @@ def attempt_enter_cell_from_position(local_grid_client, robot_state_client, comm
                                          command_client, robot_state_client)
 
 
-    time.sleep(0.5)
+    time.sleep(0.2)
 
     # Then move forward
     print(f"[INFO] Step 2: Moving forward {distance:.2f}m...")
@@ -844,7 +844,7 @@ def easy_walk(options):
     recordingInterface.stop_recording()
     recordingInterface.clear_map()
 
-    #TODO controlla che tutte le volte lui si va a scaricare gli utlimi waypoint
+    #TODO controlla che tutte le volte lui si va a scaricare gli ultimi waypoint
 
     with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
@@ -859,7 +859,7 @@ def easy_walk(options):
         recordingInterface.start_recording()
         recordingInterface.create_default_waypoint()
 
-        env = environmentMap.EnvironmentMap(rows=4, cols=4, cell_size=1)
+        env = environmentMap.EnvironmentMap(rows=6, cols=10, cell_size=2)
         x_boot, y_boot, z_boot, quat_boot = spotUtils.getPosition(robot_state_client)
 
         yaw_boot = np.arctan2(2.0 * (quat_boot.w * quat_boot.z + quat_boot.x * quat_boot.y),
@@ -876,12 +876,12 @@ def easy_walk(options):
 
         # Generate serpentine path (lawnmower pattern)
         path = env.generate_serpentine_path()
-        print(f"\n[PATH] Generated serpentine path with {len(path)} cells")
-        print(f"[PATH] Pattern: ")
-        for i, cell in enumerate(path[:20]):  # Show first 20 cells
-            print(f"  {i+1}: {cell}")
-        if len(path) > 20:
-            print(f"  ... ({len(path)-20} more cells)")
+        #print(f"\n[PATH] Generated serpentine path with {len(path)} cells")
+        # print(f"[PATH] Pattern: ")
+        # for i, cell in enumerate(path[:20]):  # Show first 20 cells
+        #     print(f"  {i+1}: {cell}")
+        # if len(path) > 20:
+        #     print(f"  ... ({len(path)-20} more cells)")
 
         # Track cells that were attempted but couldn't be reached
         attempted_cells = set()
@@ -897,8 +897,9 @@ def easy_walk(options):
             print(recordingInterface.get_waypoint_list())
 
             if current_path_index > 0:
-                blocked_cells = env.get_blocked_neighbors_with_unexplored_side(path[current_path_index-1][0],
-                                                                               path[current_path_index-1][1], path,
+                x, y, z, _ = spotUtils.getPosition(robot_state_client)
+                robot_row, robot_col = env.world_to_grid_cell(x, y)
+                blocked_cells = env.get_blocked_neighbors_with_unexplored_side(robot_row, robot_col, path,
                                                                                current_path_index)
                 if blocked_cells is not None:
                     for blocked_cell in blocked_cells:
@@ -938,9 +939,9 @@ def easy_walk(options):
                 env.mark_explored_side(path, next_index-1, path[current_path_index][0], path[current_path_index][1])
 
                 # If the cell hasn't been marked yet, mark it as blocked
-                target_row, target_col = path[next_index-1]
-                if env.map[target_row][target_col] == 0:  # Only mark if not visited
-                    env.mark_cell_blocked(target_row, target_col)
+                blocked_row, blocked_col = path[next_index-1]
+                if env.map[blocked_row][blocked_col] == 0:  # Only mark if not visited
+                    env.mark_cell_blocked(blocked_row, blocked_col)
 
             if current_path_index > 0:
                 blocked_cells = env.get_blocked_neighbors_with_unexplored_side(path[current_path_index][0], path[current_path_index][1], path, current_path_index)
@@ -960,9 +961,11 @@ def easy_walk(options):
                             print(f"[SUCCESS] Cell {blocked_cell} changed from BLOCKED (-1) to VISITED (1)")
                             print(f"[OK] Waypoint created at position ({x:.3f}, {y:.3f})")
                         else:
+                            #fixme: check this update of mark_explored_side function
+                            x, y, z, _ = spotUtils.getPosition(robot_state_client)
+                            robot_row, robot_col = env.world_to_grid_cell(x, y)
                             # Failed to enter from this side too
-                            env.mark_explored_side(blocked_cell[0], blocked_cell[1], path[current_path_index][0], path[current_path_index][1])
-
+                            env.mark_explored_side(path, current_path_index, robot_row, robot_col)
 
             # Update path index
             current_path_index = next_index
@@ -990,7 +993,7 @@ def easy_walk(options):
                 env.add_waypoint(x, y)  # Register waypoint in environment map
                 print(f"[OK] Waypoint created at cell {target_cell}")
 
-                time.sleep(1)
+                time.sleep(0.2)
             else:
                 # Get current robot position
                 x, y, z, _ = spotUtils.getPosition(robot_state_client)
@@ -1031,8 +1034,8 @@ def easy_walk(options):
                             print(f"[OK] Successfully entered cell {path[current_path_index-1]} via neighbor {tmpCell}!")
                             # Change from blocked (-1) to visited (1)
                             target_row, target_col = path[current_path_index-1]
-                            if env.map[target_row][target_col] == -1:
-                                env.map[target_row][target_col] = 1
+                            if env.map[target_row][blocked_col] == -1:
+                                env.map[target_row][blocked_col] = 1
                                 env.update_position(x, y)
                                 env.print_map()
                                 print(f"[SUCCESS] Cell {path[current_path_index-1]} changed from BLOCKED (-1) to VISITED (1)")
@@ -1057,9 +1060,9 @@ def easy_walk(options):
         print(f"\n{'='*70}")
         print(f"EXPLORATION COMPLETE")
         print(f"{'='*70}")
-        print(f"Total cells in path: {len(path)}")
+        #print(f"Total cells in path: {len(path)}")
         print(f"Cells explored: {sum(sum(row) for row in env.map)}")
-        print(f"Unreachable cells: {len(attempted_cells)}")
+        #print(f"Unreachable cells: {len(attempted_cells)}")
         if attempted_cells:
             print(f"Unreachable cells list: {sorted(attempted_cells)}")
         print(f"Final map state:")
@@ -1082,7 +1085,7 @@ def easy_walk(options):
         recordingInterface.stop_recording()
         recordingInterface.navigate_to_first_waypoint()
         command_client.robot_command(RobotCommandBuilder.synchro_sit_command(), end_time_secs=time.time() + 20)
-        sleep(5)
+        sleep(0.5)
         robot.power_off(cut_immediately=False)
         recordingInterface.download_full_graph()
         estop.stop()

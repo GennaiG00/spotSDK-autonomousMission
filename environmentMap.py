@@ -76,7 +76,7 @@ class EnvironmentMap(object):
                 target_row, target_col = path[target_index]
                 print(f"[PATH] Using target from path index {target_index}: ({target_row},{target_col})")
             else:
-                print(f"[ERROR] Invalid target index: {target_index}, path_len={len(path)}")
+                # print(f"[ERROR] Invalid target index: {target_index}, path_len={len(path)}")
                 return 0b0000
 
         # Validate that we have all necessary coordinates
@@ -213,7 +213,7 @@ class EnvironmentMap(object):
                 blocked_row, blocked_col = path[blocked_index]
                 print(f"[PATH] Using blocked cell from path index {blocked_index}: ({blocked_row},{blocked_col})")
             else:
-                print(f"[ERROR] Invalid blocked index: {blocked_index}, path_len={len(path)}")
+                # print(f"[ERROR] Invalid blocked index: {blocked_index}, path_len={len(path)}")
                 return {'north': None, 'south': None, 'east': None, 'west': None}
 
         # Validate that we have blocked cell coordinates
@@ -409,7 +409,7 @@ class EnvironmentMap(object):
                       f"facing current cell already explored (sides={bin(neighbor_sides)})")
 
         if blocked_neighbors:
-            print(f"[RESULT] Found {len(blocked_neighbors)} blocked neighbor(s) with unexplored sides: {blocked_neighbors}\n")
+            #print(f"[RESULT] Found {len(blocked_neighbors)} blocked neighbor(s) with unexplored sides: {blocked_neighbors}\n")
             return blocked_neighbors
         else:
             print(f"[RESULT] No blocked neighbors with unexplored sides found for cell ({cell_row},{cell_col})\n")
@@ -501,7 +501,7 @@ class EnvironmentMap(object):
                       f"facing current cell already explored (sides={bin(neighbor_sides)})")
 
         if untested_neighbors:
-            print(f"[RESULT] Found {len(untested_neighbors)} untested neighbor(s) with lower path index: {untested_neighbors}\n")
+            # print(f"[RESULT] Found {len(untested_neighbors)} untested neighbor(s) with lower path index: {untested_neighbors}\n")
             return untested_neighbors
         else:
             print(f"[RESULT] No untested neighbors with lower path index found for cell ({cell_row},{cell_col})\n")
@@ -759,7 +759,7 @@ class EnvironmentMap(object):
             y: World Y coordinate
         """
         self.waypoints.append((x, y))
-        print(f"[WAYPOINT] Registered waypoint #{len(self.waypoints)} at ({x:.3f}, {y:.3f})")
+        #print(f"[WAYPOINT] Registered waypoint #{len(self.waypoints)} at ({x:.3f}, {y:.3f})")
 
     def add_robot_position(self, x, y, movement_type='explore'):
         """
@@ -771,7 +771,7 @@ class EnvironmentMap(object):
             movement_type: 'explore' for exploring new cells, 'navigate' for graph navigation
         """
         self.robot_path.append((x, y, movement_type))
-        print(f"[PATH] Robot position #{len(self.robot_path)} recorded at ({x:.3f}, {y:.3f}) [{movement_type}]")
+        #print(f"[PATH] Robot position #{len(self.robot_path)} recorded at ({x:.3f}, {y:.3f}) [{movement_type}]")
 
     def print_map(self):
         """Print the current state of the map."""

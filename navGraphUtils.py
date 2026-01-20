@@ -13,7 +13,18 @@ from bosdyn.client.math_helpers import Quat, SE3Pose
 
 class RecordingInterface(object):
     def __init__(self, robot, download_filepath, client_metadata):
-        self._download_filepath = os.path.join(download_filepath, 'downloaded_graph')
+        # Create unique folder name if it already exists
+        base_path = os.path.join(download_filepath, 'downloaded_graph')
+        final_path = base_path
+        counter = 1
+
+        while os.path.exists(final_path):
+            final_path = f"{base_path}_{counter}"
+            counter += 1
+
+        self._download_filepath = final_path
+        print(f"[INFO] Graph will be saved to: {self._download_filepath}")
+
         self._recording_client = robot.ensure_client(GraphNavRecordingServiceClient.default_service_name)
         self._recording_environment = GraphNavRecordingServiceClient.make_recording_environment(
             waypoint_env=GraphNavRecordingServiceClient.make_waypoint_environment(client_metadata=client_metadata)
