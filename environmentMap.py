@@ -142,6 +142,41 @@ class EnvironmentMap(object):
         self.explored_sides[cell_key] = 0b1111
         print(f"[SIDES] Cell ({row},{col}) marked as FULLY explored (0b1111)")
 
+    def mark_cell_visited(self, row, col):
+        """
+        Mark a cell as visited (accessible).
+        Sets the map value to 1 to indicate this cell was successfully visited.
+
+        Args:
+            row: Row of the cell
+            col: Column of the cell
+
+        Returns:
+            bool: True if cell was marked successfully, False if out of bounds
+        """
+        if 0 <= row < self.rows and 0 <= col < self.cols:
+            self.map[row][col] = 1
+            print(f"[VISITED] Cell ({row},{col}) marked as visited (value=1)")
+            return True
+        else:
+            print(f"[ERROR] Cannot mark cell ({row},{col}) as visited - out of bounds")
+            return False
+
+    def is_cell_visited(self, row, col):
+        """
+        Check if a cell is marked as visited.
+
+        Args:
+            row: Row of the cell
+            col: Column of the cell
+
+        Returns:
+            bool: True if cell is visited (value=1), False otherwise
+        """
+        if 0 <= row < self.rows and 0 <= col < self.cols:
+            return self.map[row][col] == 1
+        return False
+
     def mark_cell_blocked(self, row, col):
         """
         Mark a cell as blocked (obstacle detected, cannot enter).
@@ -507,6 +542,191 @@ class EnvironmentMap(object):
             print(f"[RESULT] No untested neighbors with lower path index found for cell ({cell_row},{cell_col})\n")
             return None
 
+    def get_adjacent_frontier_cells(self, cell_row, cell_col, path):
+        """
+        Restituisce SOLO i vicini adiacenti (distanza 1) non esplorati.
+
+        Controlla i 4 vicini nelle direzioni cardinali (Nord, Sud, Est, Ovest) e restituisce
+        quelli che non sono ancora stati esplorati (valore == 0).
+
+        Args:
+            cell_row: Riga della cella corrente
+            cell_col: Colonna della cella corrente
+            path: Lista di tuple (row, col) che rappresenta il percorso serpentina (required)
+
+        Returns:
+            list: Lista di tuple (row, col, rank) dei vicini adiacenti non esplorati,
+                  ordinata per rank crescente. Lista vuota [] se non ci sono vicini.
+
+        Example:
+            adjacent = env_map.get_adjacent_frontier_cells(2, 3, path)
+            if adjacent:
+                # adjacent = [(1,3,5), (2,4,7)]  # Vicini ordinati per rank
+                target_row, target_col, rank = adjacent[0]  # Prendi quello con rank minore
+            else:
+                # Nessun vicino disponibile, devi usare get_lowest_rank_unexplored_cell
+        """
+        if path is None:
+            print(f"[ERROR] get_adjacent_frontier_cells requires path parameter")
+            return []
+
+        print(f"\n[ADJACENT] Ricerca vicini adiacenti non esplorati dalla cella ({cell_row},{cell_col})")
+
+        # Crea un mapping da (row, col) a path index (rank) per lookup veloce
+        cell_to_rank = {cell: idx for idx, cell in enumerate(path)}
+
+        unexplored_neighbors = []
+        neighbors = [
+            (-1, 0, 'north'),  # Nord: row - 1
+            (1, 0, 'south'),   # Sud: row + 1
+            (0, 1, 'east'),    # Est: col + 1
+            (0, -1, 'west')    # Ovest: col - 1
+        ]
+
+        for dr, dc, direction in neighbors:
+            neighbor_row = cell_row + dr
+            neighbor_col = cell_col + dc
+
+            # Controlla se il vicino è dentro i limiti
+            if not (0 <= neighbor_row < self.rows and 0 <= neighbor_col < self.cols):
+                continue
+
+            # Controlla se il vicino NON è stato esplorato (valore == 0)
+            if self.map[neighbor_row][neighbor_col] == 0:
+                neighbor_cell = (neighbor_row, neighbor_col)
+                # Ottieni il rank dal path
+                rank = cell_to_rank.get(neighbor_cell, float('inf'))
+                unexplored_neighbors.append((neighbor_row, neighbor_col, rank))
+                print(f"  ✓ Vicino {direction}: ({neighbor_row},{neighbor_col}) con rank={rank}")
+
+        if unexplored_neighbors:
+            # Ordina per rank crescente (priorità al rank più basso)
+            unexplored_neighbors.sort(key=lambda x: x[2])
+            print(f"[ADJACENT] ✓ Trovati {len(unexplored_neighbors)} vicini non esplorati")
+            print(f"[ADJACENT] Vicino con rank minore: ({unexplored_neighbors[0][0]},{unexplored_neighbors[0][1]}) rank={unexplored_neighbors[0][2]}")
+            return unexplored_neighbors
+        else:
+            print(f"[ADJACENT] Nessun vicino adiacente non esplorato trovato")
+            return []
+
+    def get_lowest_rank_unexplored_cell(self, path):
+        """
+        Restituisce la cella non esplorata con il rank (valore serpentina) più basso in TUTTA la mappa.
+
+        Scansiona tutte le celle della griglia e trova quella con:
+        - Valore == 0 (non ancora esplorata)
+        - Rank più basso (valore path/serpentina minore)
+
+        Usa questo metodo quando get_adjacent_frontier_cells restituisce lista vuota (nessun vicino disponibile).
+
+        Args:
+            path: Lista di tuple (row, col) che rappresenta il percorso serpentina (required)
+
+        Returns:
+            tuple or None: Tupla (row, col, rank) della cella con rank più basso,
+                          oppure None se non ci sono celle non esplorate (mappa completa).
+
+        Example:
+            lowest_cell = env_map.get_lowest_rank_unexplored_cell(path)
+            if lowest_cell:
+                target_row, target_col, rank = lowest_cell
+                print(f"Vai alla cella ({target_row},{target_col}) con rank {rank}")
+            else:
+                print("Mappa completamente esplorata!")
+        """
+        if path is None:
+            print(f"[ERROR] get_lowest_rank_unexplored_cell requires path parameter")
+            return None
+
+        print(f"\n[LOWEST_RANK] Ricerca cella con rank più basso in tutta la mappa...")
+
+        # Crea un mapping da (row, col) a path index (rank) per lookup veloce
+        cell_to_rank = {cell: idx for idx, cell in enumerate(path)}
+
+        min_rank = float('inf')
+        best_cell = None
+
+        for row in range(self.rows):
+            for col in range(self.cols):
+                # Considera solo celle non esplorate (valore == 0)
+                if self.map[row][col] == 0:
+                    cell = (row, col)
+                    rank = cell_to_rank.get(cell, float('inf'))
+                    if rank < min_rank:
+                        min_rank = rank
+                        best_cell = (row, col, rank)
+
+        if best_cell:
+            print(f"[LOWEST_RANK] ✓ Cella con rank più basso: ({best_cell[0]},{best_cell[1]}) rank={best_cell[2]}")
+            return best_cell
+        else:
+            print(f"[LOWEST_RANK] ⚠️ Nessuna cella non esplorata trovata - mappa completamente esplorata!")
+            return None
+
+    def get_lowest_rank_from_frontier_list(self, frontier_list, path):
+        """
+        Trova la cella con il rank più basso da una lista di celle di frontiera.
+
+        Questa è utile quando hai già una lista di celle (non necessariamente ordinate
+        o complete) e vuoi trovare quella con il rank minore nel percorso serpentina.
+
+        Args:
+            frontier_list: Lista di tuple (row, col) o (row, col, rank) delle celle di frontiera
+            path: Lista di tuple (row, col) che rappresenta il percorso serpentina (required)
+
+        Returns:
+            tuple or None: Tupla (row, col, rank) della cella con rank più basso,
+                          oppure None se la lista è vuota o il path non è valido.
+
+        Example:
+            # Hai una lista di celle di frontiera (non ordinate)
+            frontiers = [(3,5), (1,2), (4,7), (2,3)]
+
+            # Trova quella con rank minore
+            best = env.get_lowest_rank_from_frontier_list(frontiers, path)
+            if best:
+                target_row, target_col, rank = best
+                print(f"Cella con rank minore: ({target_row},{target_col}) rank={rank}")
+        """
+        if path is None:
+            print(f"[ERROR] get_lowest_rank_from_frontier_list requires path parameter")
+            return None
+
+        if not frontier_list or len(frontier_list) == 0:
+            print(f"[FRONTIER_RANK] Lista di frontiere vuota")
+            return None
+
+        print(f"\n[FRONTIER_RANK] Ricerca cella con rank più basso tra {len(frontier_list)} celle di frontiera")
+
+        # Crea un mapping da (row, col) a path index (rank) per lookup veloce
+        cell_to_rank = {cell: idx for idx, cell in enumerate(path)}
+
+        min_rank = float('inf')
+        best_cell = None
+
+        for cell in frontier_list:
+            # Gestisci sia tuple (row, col) che (row, col, rank)
+            if isinstance(cell, tuple):
+                if len(cell) >= 2:
+                    row, col = cell[0], cell[1]
+                    cell_tuple = (row, col)
+
+                    # Ottieni il rank dal path
+                    rank = cell_to_rank.get(cell_tuple, float('inf'))
+
+                    print(f"  Cella ({row},{col}): rank={rank}")
+
+                    if rank < min_rank:
+                        min_rank = rank
+                        best_cell = (row, col, rank)
+
+        if best_cell:
+            print(f"[FRONTIER_RANK] ✓ Cella con rank più basso: ({best_cell[0]},{best_cell[1]}) rank={best_cell[2]}")
+            return best_cell
+        else:
+            print(f"[FRONTIER_RANK] ⚠️ Nessuna cella valida trovata nella lista")
+            return None
+
     def get_cell_sides_status(self, row, col):
         """
         Get the exploration status of a cell's sides.
@@ -659,13 +879,6 @@ class EnvironmentMap(object):
 
         return (row, col)
 
-    def world_to_grid_cell(self, x, y):
-        """
-        Alias for get_cell_from_world for clearer semantics.
-        Convert world coordinates to grid cell without marking as visited.
-        """
-        return self.get_cell_from_world(x, y)
-
     def get_cell_status(self, row, col):
         """
         Get the status of a cell in the map.
@@ -761,6 +974,117 @@ class EnvironmentMap(object):
         self.waypoints.append((x, y))
         print(f"[WAYPOINT] Registered waypoint #{len(self.waypoints)} at ({x:.3f}, {y:.3f})")
 
+    def get_nearest_waypoint_to_cell(self, cell_row, cell_col):
+        """
+        Trova il waypoint più vicino al centro di una cella specifica.
+
+        Questo è utile quando devi navigare verso una cella lontana (es. lowest_rank_cell)
+        e vuoi trovare il waypoint già visitato più vicino per usarlo come punto di partenza.
+
+        Args:
+            cell_row: Riga della cella target
+            cell_col: Colonna della cella target
+
+        Returns:
+            tuple or None: (waypoint_x, waypoint_y, waypoint_index, distance) del waypoint più vicino,
+                          oppure None se non ci sono waypoint registrati.
+
+        Example:
+            # Trova waypoint più vicino alla cella con lowest_rank
+            result = env.get_nearest_waypoint_to_cell(target_row, target_col)
+            if result:
+                wp_x, wp_y, wp_index, distance = result
+                print(f"Waypoint #{wp_index} a distanza {distance:.2f}m")
+                # Naviga al waypoint e poi alla cella target
+        """
+        if not self.waypoints or len(self.waypoints) == 0:
+            print(f"[NEAREST_WP] Nessun waypoint registrato")
+            return None
+
+        # Ottieni le coordinate world del centro della cella target
+        cell_center = self.get_world_position_from_cell(cell_row, cell_col)
+        if cell_center is None:
+            print(f"[NEAREST_WP] Cella ({cell_row},{cell_col}) fuori dai limiti")
+            return None
+
+        target_x, target_y = cell_center
+        print(f"\n[NEAREST_WP] Ricerca waypoint più vicino alla cella ({cell_row},{cell_col})")
+        print(f"[NEAREST_WP] Centro cella target: ({target_x:.3f}, {target_y:.3f})")
+
+        # Trova il waypoint con distanza minima
+        min_distance = float('inf')
+        nearest_waypoint = None
+        nearest_index = -1
+
+        for i, waypoint in enumerate(self.waypoints):
+            if not isinstance(waypoint, (tuple, list)) or len(waypoint) < 2:
+                continue
+
+            wp_x, wp_y = waypoint[0], waypoint[1]
+
+            # Calcola distanza euclidea
+            distance = np.sqrt((wp_x - target_x)**2 + (wp_y - target_y)**2)
+
+            print(f"  Waypoint #{i}: ({wp_x:.3f}, {wp_y:.3f}) - distanza: {distance:.3f}m")
+
+            if distance < min_distance:
+                min_distance = distance
+                nearest_waypoint = (wp_x, wp_y)
+                nearest_index = i
+
+        if nearest_waypoint:
+            print(f"[NEAREST_WP] ✓ Waypoint più vicino: #{nearest_index} a {min_distance:.3f}m")
+            return (nearest_waypoint[0], nearest_waypoint[1], nearest_index, min_distance)
+        else:
+            print(f"[NEAREST_WP] ⚠️ Nessun waypoint valido trovato")
+            return None
+
+    def get_nearest_visited_cell_to_target(self, target_row, target_col):
+        """
+        Trova la cella VISITATA (valore=1) più vicina a una cella target.
+
+        Questo è utile per trovare da quale cella visitata partire per raggiungere
+        una cella lontana non esplorata.
+
+        Args:
+            target_row: Riga della cella target
+            target_col: Colonna della cella target
+
+        Returns:
+            tuple or None: (row, col, distance) della cella visitata più vicina,
+                          oppure None se non ci sono celle visitate.
+
+        Example:
+            # Trova cella visitata più vicina alla lowest_rank_cell
+            result = env.get_nearest_visited_cell_to_target(target_row, target_col)
+            if result:
+                visited_row, visited_col, dist = result
+                print(f"Cella visitata più vicina: ({visited_row},{visited_col}) a {dist:.2f} celle")
+        """
+        print(f"\n[NEAREST_VISITED] Ricerca cella visitata più vicina a ({target_row},{target_col})")
+
+        min_distance = float('inf')
+        nearest_cell = None
+
+        for row in range(self.rows):
+            for col in range(self.cols):
+                # Considera solo celle VISITATE (valore == 1)
+                if self.map[row][col] == 1:
+                    # Calcola distanza Manhattan (in celle)
+                    distance = abs(row - target_row) + abs(col - target_col)
+
+                    if distance < min_distance:
+                        min_distance = distance
+                        nearest_cell = (row, col)
+
+        if nearest_cell:
+            print(f"[NEAREST_VISITED] ✓ Cella visitata più vicina: ({nearest_cell[0]},{nearest_cell[1]}) "
+                  f"a {min_distance} celle di distanza")
+            return (nearest_cell[0], nearest_cell[1], min_distance)
+        else:
+            print(f"[NEAREST_VISITED] ⚠️ Nessuna cella visitata trovata")
+            return None
+
     def add_robot_position(self, x, y, movement_type='explore'):
         """
         Register a robot position to track its path.
@@ -781,6 +1105,8 @@ class EnvironmentMap(object):
         if hasattr(self, 'current_cell'):
             print(f"Current cell: {self.current_cell}")
         print("-----------------------\n")
+
+
 
 
 

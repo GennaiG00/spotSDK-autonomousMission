@@ -8,6 +8,7 @@ import bosdyn.client
 import bosdyn.client.lease
 import bosdyn.client.util
 import bosdyn.geometry
+from bosdyn.client import robot
 from bosdyn.client.frame_helpers import *
 from bosdyn.client.robot_command import (RobotCommandBuilder, RobotCommandClient, blocking_stand)
 from bosdyn.client.local_grid import LocalGridClient
@@ -19,6 +20,8 @@ import spotGrid
 import spotLogInUtils
 import environmentMap
 import spotUtils
+
+#TODO: check if the we can avoid to set a sleep after each movement command
 
 def find_nearest_waypoint_to_cell(env, target_cell, recording_interface):
     """
@@ -89,7 +92,7 @@ def navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command
         return False, target_cell
 
     print(f"[OK] Reached waypoint {waypoint_id}")
-    time.sleep(1)
+    time.sleep(0.5)
 
     return True, target_cell
 
@@ -225,7 +228,7 @@ def find_best_point_in_cell(robot_x, robot_y, env, cell_row, cell_col, pts, cell
             min_distance = dist
             best_point = (sample_x, sample_y)
 
-    print(f"[OK] Found {len(valid_samples)} valid points in cell ({cell_row},{cell_col}), chose closest to center at {min_distance:.2f}m from center")
+    #print(f"[OK] Found {len(valid_samples)} valid points in cell ({cell_row},{cell_col}), chose closest to center at {min_distance:.2f}m from center")
 
     return best_point[0], best_point[1], valid_samples, rejected_samples
 
@@ -413,11 +416,12 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
             for i, waypoint in enumerate(env.waypoints):
                 if not isinstance(waypoint, (tuple, list)):
                     continue
-                if len(waypoint) >= 2:  # Ensure it's a valid tuple/list
-                    wp_x, wp_y = waypoint[0], waypoint[1]
-                    if (local_x_min - 0.5 <= wp_x <= local_x_max + 0.5 and
-                        local_y_min - 0.5 <= wp_y <= local_y_max + 0.5):
-                        visible_waypoints.append((wp_x, wp_y, i))
+                if type(waypoint) != int:
+                    if len(waypoint) >= 2:  # Ensure it's a valid tuple/list
+                        wp_x, wp_y = waypoint[0], waypoint[1]
+                        if (local_x_min - 0.5 <= wp_x <= local_x_max + 0.5 and
+                            local_y_min - 0.5 <= wp_y <= local_y_max + 0.5):
+                            visible_waypoints.append((wp_x, wp_y, i))
 
             # Draw lines connecting waypoints (in order)
             if type(visible_waypoints) != int:
@@ -449,14 +453,15 @@ def visualize_grid_with_candidates(pts, cells_no_step, color, robot_x, robot_y,
                     continue
 
                 # Handle both old format (x, y) and new format (x, y, movement_type)
-                if len(entry) >= 2:
-                    pos_x, pos_y = entry[0], entry[1]
-                    movement_type = entry[2] if len(entry) >= 3 else 'explore'
+                if type(entry) != int:
+                    if len(entry) >= 2:
+                        pos_x, pos_y = entry[0], entry[1]
+                        movement_type = entry[2] if len(entry) >= 3 else 'explore'
 
-                    # Check if within visible bounds
-                    if (local_x_min - 0.5 <= pos_x <= local_x_max + 0.5 and
-                        local_y_min - 0.5 <= pos_y <= local_y_max + 0.5):
-                        all_positions.append((pos_x, pos_y, movement_type))
+                        # Check if within visible bounds
+                        if (local_x_min - 0.5 <= pos_x <= local_x_max + 0.5 and
+                            local_y_min - 0.5 <= pos_y <= local_y_max + 0.5):
+                            all_positions.append((pos_x, pos_y, movement_type))
 
             # Draw traces connecting ALL robot positions in sequence
             if type(all_positions) != int:
@@ -604,9 +609,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
 
     # Sample 20 random points in the cell and find the best one with clear path
     print(f"[INFO] Sampling 20 random points in cell ({target_row},{target_col})...")
-    target_x, target_y, valid_samples, rejected_samples = find_best_point_in_cell(
-        robot_x, robot_y, env, target_row, target_col, pts, cells_no_step
-    )
+    target_x, target_y, valid_samples, rejected_samples = find_best_point_in_cell(robot_x, robot_y, env, target_row, target_col, pts, cells_no_step)
 
     if target_x is None or target_y is None:
         print(f"[WARNING] No clear path to cell ({target_row},{target_col})")
@@ -615,7 +618,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
         # Mark this cell as blocked (obstacle detected)
         env.mark_cell_blocked(target_row, target_col)
 
-        # Visualize the blocked path
+        #Visualize the blocked path
         visualize_grid_with_candidates(
             pts, cells_no_step, color, robot_x, robot_y,
             {'rejected': rejected_samples, 'valid': []},
@@ -631,14 +634,12 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
             alt_row, alt_col = alt_cell
 
             # Skip if already visited
-            empty, _ = env.get_cell_status(alt_row, alt_col)
-            if empty == 1:
+            full, _ = env.get_cell_status(alt_row, alt_col)
+            if full == 1:
                 continue
 
             # Try to find a valid point in this alternative cell
-            alt_x, alt_y, alt_valid, alt_rejected = find_best_point_in_cell(
-                robot_x, robot_y, env, alt_row, alt_col, pts, cells_no_step
-            )
+            alt_x, alt_y, alt_valid, alt_rejected = find_best_point_in_cell(robot_x, robot_y, env, alt_row, alt_col, pts, cells_no_step)
 
             if alt_x is not None and alt_y is not None:
                 # Found a reachable alternative!
@@ -668,7 +669,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
 
     print(f"[INFO] Distance to target: {distance:.2f}m")
 
-    # Visualize target with sampled points
+    #Visualize target with sampled points
     visualize_grid_with_candidates(
         pts, cells_no_step, color, robot_x, robot_y,
         {'rejected': rejected_samples, 'valid': valid_samples},
@@ -698,7 +699,7 @@ def move_to_next_cell_in_path(local_grid_client, robot_state_client, command_cli
         print("[ERROR] Failed to rotate")
         return False, next_index + 1, target_cell
 
-    time.sleep(0.5)
+    time.sleep(0.2)
 
     # Then move forward
     print(f"[INFO] Step 2: Moving forward {distance:.2f}m...")
@@ -793,7 +794,7 @@ def attempt_enter_cell_from_position(local_grid_client, robot_state_client, comm
 
     print(f"[INFO] Distance to target: {distance:.2f}m")
 
-    # Visualize target with sampled points
+    #Visualize target with sampled points
     visualize_grid_with_candidates(
         pts, cells_no_step, color, robot_x, robot_y,
         {'rejected': rejected_samples, 'valid': valid_samples},
@@ -820,7 +821,7 @@ def attempt_enter_cell_from_position(local_grid_client, robot_state_client, comm
                                          command_client, robot_state_client)
 
 
-    time.sleep(0.5)
+    time.sleep(0.2)
 
     # Then move forward
     print(f"[INFO] Step 2: Moving forward {distance:.2f}m...")
@@ -844,7 +845,7 @@ def easy_walk(options):
     recordingInterface.stop_recording()
     recordingInterface.clear_map()
 
-    #TODO controlla che tutte le volte lui si va a scaricare gli utlimi waypoint
+    #TODO controlla che tutte le volte lui si va a scaricare gli ultimi waypoint
 
     with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
@@ -859,7 +860,7 @@ def easy_walk(options):
         recordingInterface.start_recording()
         recordingInterface.create_default_waypoint()
 
-        env = environmentMap.EnvironmentMap(rows=4, cols=4, cell_size=1)
+        env = environmentMap.EnvironmentMap(rows=5, cols=5, cell_size=0.5)
         x_boot, y_boot, z_boot, quat_boot = spotUtils.getPosition(robot_state_client)
 
         yaw_boot = np.arctan2(2.0 * (quat_boot.w * quat_boot.z + quat_boot.x * quat_boot.y),
@@ -876,193 +877,149 @@ def easy_walk(options):
 
         # Generate serpentine path (lawnmower pattern)
         path = env.generate_serpentine_path()
-        print(f"\n[PATH] Generated serpentine path with {len(path)} cells")
-        print(f"[PATH] Pattern: ")
-        for i, cell in enumerate(path[:20]):  # Show first 20 cells
-            print(f"  {i+1}: {cell}")
-        if len(path) > 20:
-            print(f"  ... ({len(path)-20} more cells)")
+        #print(f"\n[PATH] Generated serpentine path with {len(path)} cells")
+        # print(f"[PATH] Pattern: ")
+        # for i, cell in enumerate(path[:20]):  # Show first 20 cells
+        #     print(f"  {i+1}: {cell}")
+        # if len(path) > 20:
+        #     print(f"  ... ({len(path)-20} more cells)")
 
-        # Track cells that were attempted but couldn't be reached
-        attempted_cells = set()
+        frontier = []
         cell_attempt_count = {}  # Track how many times we tried each cell
         # Follow the serpentine path
         current_path_index = 0
 
-        while current_path_index < len(path):
+        while(True):
             print(f"\n{'#'*70}")
             print(f"### PATH STEP: {current_path_index + 1}/{len(path)} ###")
             print(f"{'#'*70}\n")
 
             print(recordingInterface.get_waypoint_list())
 
-            if current_path_index > 0:
-                blocked_cells = env.get_blocked_neighbors_with_unexplored_side(path[current_path_index-1][0],
-                                                                               path[current_path_index-1][1], path,
-                                                                               current_path_index)
-                if blocked_cells is not None:
-                    for blocked_cell in blocked_cells:
-                        tmpRet = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client,
-                                                                  env, blocked_cell[0], blocked_cell[1])
-                        if tmpRet:
-                            # Successfully entered! Mark as fully explored and visited
-                            env.map[blocked_cell[0]][blocked_cell[1]] = 1  # Mark as visited (change from -1 to 1)
+            x, y, z, _ = spotUtils.getPosition(robot_state_client)
+            robot_row, robot_col = env.get_cell_from_world(x, y)
 
-                            # Get position and create waypoint
-                            x, y, z, _ = spotUtils.getPosition(robot_state_client)
-                            recordingInterface.create_default_waypoint()
-                            env.add_waypoint(x, y)  # Register waypoint in environment map
-                            env.add_robot_position(x, y, 'explore')  # Track exploration movement
-
-                            print(f"[SUCCESS] Cell {blocked_cell} changed from BLOCKED (-1) to VISITED (1)")
-                            print(f"[OK] Waypoint created at position ({x:.3f}, {y:.3f})")
-                        else:
-                            # Failed to enter from this side too
-                            env.mark_explored_side(blocked_cell[0], blocked_cell[1], path[current_path_index][0],
-                                                   path[current_path_index][1])
-
-            # Move to next cell in path
-            success, next_index, target_cell = move_to_next_cell_in_path(
-                local_grid_client,
-                robot_state_client,
-                command_client,
-                env,
-                path,
-                current_path_index,
-                recordingInterface,
-                attempted_cells=attempted_cells
+            # PLOT: Stato iniziale dell'iterazione
+            visualize_grid_with_candidates(
+                pts=np.array([[x, y]]),
+                cells_no_step=[],
+                color=np.array([[255, 255, 255]]),
+                robot_x=x,
+                robot_y=y,
+                candidates={'valid': [], 'rejected': []},
+                chosen_point=None,
+                iteration=f"{current_path_index}_start",
+                env=env
             )
 
-            if success is False:
-                # Mark the side as explored from current position
-                env.mark_explored_side(path, next_index-1, path[current_path_index][0], path[current_path_index][1])
+            borders = env.get_adjacent_frontier_cells(robot_row, robot_col, path)
 
-                # If the cell hasn't been marked yet, mark it as blocked
-                target_row, target_col = path[next_index-1]
-                if env.map[target_row][target_col] == 0:  # Only mark if not visited
-                    env.mark_cell_blocked(target_row, target_col)
+            if len(borders) != 0 :
+                for border in borders:
+                    if border not in frontier and env.is_cell_visited(border[0], border[1]) != 1:
+                        frontier.append(border)
+                for border in borders:
+                    check = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client, env, border[0], border[1])
+                    frontier.remove(border)
+                    if check:
+                        env.update_position(x, y)
+                        env.print_map()
+                        recordingInterface.get_recording_status()
+                        recordingInterface.create_default_waypoint()
+                        env.add_waypoint(x, y)
+                        env.mark_cell_visited(border[0], border[1])
 
-            if current_path_index > 0:
-                blocked_cells = env.get_blocked_neighbors_with_unexplored_side(path[current_path_index][0], path[current_path_index][1], path, current_path_index)
-                if blocked_cells is not None:
-                    for blocked_cell in blocked_cells:
-                        tmpRet = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client, env, blocked_cell[0], blocked_cell[1])
-                        if tmpRet:
-                            # Successfully entered! Mark as fully explored and visited
-                            env.map[blocked_cell[0]][blocked_cell[1]] = 1  # Mark as visited (change from -1 to 1)
-
-                            # Get position and create waypoint
-                            x, y, z, _ = spotUtils.getPosition(robot_state_client)
-                            recordingInterface.create_default_waypoint()
-                            env.add_waypoint(x, y)  # Register waypoint in environment map
-                            env.add_robot_position(x, y, 'explore')  # Track exploration movement
-
-                            print(f"[SUCCESS] Cell {blocked_cell} changed from BLOCKED (-1) to VISITED (1)")
-                            print(f"[OK] Waypoint created at position ({x:.3f}, {y:.3f})")
-                        else:
-                            # Failed to enter from this side too
-                            env.mark_explored_side(blocked_cell[0], blocked_cell[1], path[current_path_index][0], path[current_path_index][1])
-
-
-            # Update path index
-            current_path_index = next_index
-
-            if success:
-                # Get new position
-                x, y, z, _ = spotUtils.getPosition(robot_state_client)
-                print(f'[POS] Current position: x={x:.3f}, y={y:.3f}')
-                print(f'[POS] Delta from boot: dx={x-x_boot:.3f}, dy={y-y_boot:.3f}')
-
-                # ONLY update map if movement was successful
-                env.update_position(x, y)
-                env.print_map()
-
-                # Remove from attempted cells if we successfully reached it
-                if target_cell and target_cell in attempted_cells:
-                    attempted_cells.remove(target_cell)
-                    if target_cell in cell_attempt_count:
-                        del cell_attempt_count[target_cell]
-                    print(f"[OK] Cell {target_cell} successfully explored and marked!")
-
-                # Create waypoint and register its position
-                recordingInterface.get_recording_status()
-                recordingInterface.create_default_waypoint()
-                env.add_waypoint(x, y)  # Register waypoint in environment map
-                print(f"[OK] Waypoint created at cell {target_cell}")
-
-                time.sleep(1)
-            else:
-                # Get current robot position
-                x, y, z, _ = spotUtils.getPosition(robot_state_client)
-                robot_cell = env.world_to_grid_cell(x, y)
-                #FIXME: Quando il robot arriva in una casella es 1,3 visitata e deve controllare la 2,2, la controlla dalla 1,3 tralasciando il test dalla non
-                # ancora scoperta 2,3
-                if robot_cell:
-                    robot_row, robot_col = robot_cell
-
-                    # Mark explored side
-                    env.mark_explored_side(path, current_path_index-1, robot_row, robot_col)
-
-                    # Get visited neighbors with directional context (relative to movement)
-                    visited_neighbors = env.return_visited_cells_near_blocked(path, current_path_index-1, robot_row, robot_col)
-
-                    # Create list of positions to check: target_cell + all non-None neighbors
-                    position_to_check = []
-                    for direction, neighbor_cell in visited_neighbors.items():
-                        if neighbor_cell is not None and neighbor_cell != robot_cell:
-                            position_to_check.append(neighbor_cell)
-
-                    print(f"[INFO] Positions to check: {position_to_check}")
-
-                    for tmpCell in position_to_check:
-                        recordingInterface.stop_recording()
-                        navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command_client, env, recordingInterface, tmpCell)
-                        recordingInterface.start_recording()
-
-                        free = attempt_enter_cell_from_position(
-                            local_grid_client, robot_state_client, command_client,
-                            env, path[current_path_index-1][0], path[current_path_index-1][1]
+                        # PLOT: Dopo movimento riuscito
+                        x_new, y_new, z_new, _ = spotUtils.getPosition(robot_state_client)
+                        visualize_grid_with_candidates(
+                            pts=np.array([[x_new, y_new]]),
+                            cells_no_step=[],
+                            color=np.array([[255, 255, 255]]),
+                            robot_x=x_new,
+                            robot_y=y_new,
+                            candidates={'valid': [], 'rejected': []},
+                            chosen_point=None,
+                            iteration=f"{current_path_index}_success",
+                            env=env
                         )
+                        break
+                    else:
+                        continue
+            else:
+                lowest_rank_cell_row, lowest_rank_cell_col = env.get_lowest_rank_from_frontier_list(frontier, path)
+                frontier.remove((lowest_rank_cell_row, lowest_rank_cell_col))
+                pos_cell = env.get_world_position_from_cell(lowest_rank_cell_row, lowest_rank_cell_col)
 
-                        if free is False:
-                            env.mark_explored_side(path, current_path_index-1, robot_row, robot_col)
-                            recordingInterface.create_default_waypoint()
-                        else:
-                            print(f"[OK] Successfully entered cell {path[current_path_index-1]} via neighbor {tmpCell}!")
-                            # Change from blocked (-1) to visited (1)
-                            target_row, target_col = path[current_path_index-1]
-                            if env.map[target_row][target_col] == -1:
-                                env.map[target_row][target_col] = 1
-                                env.update_position(x, y)
-                                env.print_map()
-                                print(f"[SUCCESS] Cell {path[current_path_index-1]} changed from BLOCKED (-1) to VISITED (1)")
-                            break
-                    # Check if we can navigate through a visited neighbor
-                    if any(visited_neighbors.values()):
-                        print(f"[INFO] Alternative navigation possible through visited neighbors")
+                # PLOT: Decisione cella con lowest rank
+                visualize_grid_with_candidates(
+                    pts=np.array([[x, y]]),
+                    cells_no_step=[],
+                    color=np.array([[255, 255, 255]]),
+                    robot_x=x,
+                    robot_y=y,
+                    candidates={'valid': [pos_cell], 'rejected': []},
+                    chosen_point=pos_cell,
+                    iteration=f"{current_path_index}_decision",
+                    env=env
+                )
+
+                waypoint = recordingInterface.find_nearest_waypoint_to_position(pos_cell[0], pos_cell[1])
+                if waypoint is not None:
+                    success = recordingInterface.navigate_to_waypoint(waypoint['id'])
+
+                    # PLOT: Dopo navigazione al waypoint
+                    if success:
+                        x_nav, y_nav, z_nav, _ = spotUtils.getPosition(robot_state_client)
+                        visualize_grid_with_candidates(
+                            pts=np.array([[x_nav, y_nav]]),
+                            cells_no_step=[],
+                            color=np.array([[255, 255, 255]]),
+                            robot_x=x_nav,
+                            robot_y=y_nav,
+                            candidates={'valid': [pos_cell], 'rejected': []},
+                            chosen_point=pos_cell,
+                            iteration=f"{current_path_index}_after_nav",
+                            env=env
+                        )
                 else:
-                    print("[WARNING] Could not determine robot cell position")
-
-                # Check if we've exhausted the path
-                if target_cell is None:
-                    print("[INFO] All reachable cells have been explored!")
+                    print(f"[ERROR] No waypoint found near cell {lowest_rank_cell_row, lowest_rank_cell_col}")
                     break
+                if success is False:
+                    print(f"[ERROR] Could not navigate to waypoint {waypoint['id']} near cell {lowest_rank_cell_row, lowest_rank_cell_col}")
+                    break
+                else:
+                    check = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client, env, lowest_rank_cell_row, lowest_rank_cell_col)
+                    if check:
+                        env.update_position(x, y)
+                        env.print_map()
+                        recordingInterface.get_recording_status()
+                        recordingInterface.create_default_waypoint()
+                        env.add_waypoint(x, y)
 
-                if target_cell is not None:
-                    recordingInterface.stop_recording()
-                    navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command_client, env, recordingInterface, target_cell)
-                    recordingInterface.start_recording()
-
+                        # PLOT: Dopo movimento riuscito alla cella lontana
+                        x_final, y_final, z_final, _ = spotUtils.getPosition(robot_state_client)
+                        visualize_grid_with_candidates(
+                            pts=np.array([[x_final, y_final]]),
+                            cells_no_step=[],
+                            color=np.array([[255, 255, 255]]),
+                            robot_x=x_final,
+                            robot_y=y_final,
+                            candidates={'valid': [], 'rejected': []},
+                            chosen_point=None,
+                            iteration=f"{current_path_index}_far_success",
+                            env=env
+                        )
+                    else:
+                        print(f"[ERROR] Could not enter cell {lowest_rank_cell_row, lowest_rank_cell_col} after navigating to waypoint {waypoint['id']}")
+                        break
+            if len(frontier) == 0:
+                break
         # Print final exploration statistics
         print(f"\n{'='*70}")
         print(f"EXPLORATION COMPLETE")
         print(f"{'='*70}")
-        print(f"Total cells in path: {len(path)}")
+        #print(f"Total cells in path: {len(path)}")
         print(f"Cells explored: {sum(sum(row) for row in env.map)}")
-        print(f"Unreachable cells: {len(attempted_cells)}")
-        if attempted_cells:
-            print(f"Unreachable cells list: {sorted(attempted_cells)}")
-        print(f"Final map state:")
         env.print_map()
 
         recordingInterface.create_default_waypoint()
@@ -1082,7 +1039,7 @@ def easy_walk(options):
         recordingInterface.stop_recording()
         recordingInterface.navigate_to_first_waypoint()
         command_client.robot_command(RobotCommandBuilder.synchro_sit_command(), end_time_secs=time.time() + 20)
-        sleep(5)
+        sleep(0.5)
         robot.power_off(cut_immediately=False)
         recordingInterface.download_full_graph()
         estop.stop()

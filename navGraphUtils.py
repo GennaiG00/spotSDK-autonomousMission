@@ -303,6 +303,104 @@ class RecordingInterface(object):
             return []
         return list(graph.waypoints)
 
+    def get_waypoint_details_list(self):
+        """
+        Get detailed information about all waypoints in the current graph.
+
+        Returns:
+            list: List of dictionaries with waypoint details:
+                - 'id': Waypoint unique ID
+                - 'name': Waypoint name (e.g., 'waypoint_0')
+                - 'x': X position in world coordinates
+                - 'y': Y position in world coordinates
+                - 'z': Z position in world coordinates
+                - 'waypoint_obj': Full waypoint object
+
+        Example:
+            waypoints = recording.get_waypoint_details_list()
+            for wp in waypoints:
+                print(f"Waypoint {wp['name']} at ({wp['x']:.2f}, {wp['y']:.2f})")
+        """
+        graph = self._graph_nav_client.download_graph()
+        if not graph or len(graph.waypoints) == 0:
+            print("[WAYPOINTS] No waypoints found in graph")
+            return []
+
+        waypoint_details = []
+
+        for waypoint in graph.waypoints:
+            # Extract position from waypoint_tform_ko (waypoint transform from kinematic odometry)
+            transform = waypoint.waypoint_tform_ko
+
+            details = {
+                'id': waypoint.id,
+                'name': waypoint.annotations.name if waypoint.annotations.name else 'unnamed',
+                'x': transform.position.x,
+                'y': transform.position.y,
+                'z': transform.position.z,
+                'waypoint_obj': waypoint
+            }
+            waypoint_details.append(details)
+
+        print(f"[WAYPOINTS] Found {len(waypoint_details)} waypoints in graph:")
+        for wp in waypoint_details:
+            print(f"  - {wp['name']}: ID={wp['id']}, pos=({wp['x']:.3f}, {wp['y']:.3f}, {wp['z']:.3f})")
+
+        return waypoint_details
+
+    def find_nearest_waypoint_to_position(self, target_x, target_y):
+        """
+        Trova il waypoint più vicino a una posizione world (x, y) specificata.
+
+        Args:
+            target_x: Coordinata X world della posizione target
+            target_y: Coordinata Y world della posizione target
+
+        Returns:
+            dict or None: Dizionario con dettagli del waypoint più vicino:
+                - 'id': ID del waypoint
+                - 'name': Nome del waypoint
+                - 'x', 'y', 'z': Posizione
+                - 'distance': Distanza euclidea dalla posizione target
+                - 'waypoint_obj': Oggetto waypoint completo
+                Oppure None se non ci sono waypoint
+
+        Example:
+            # Trova waypoint più vicino al centro di una cella
+            cell_center_x, cell_center_y = env.get_world_position_from_cell(row, col)
+            nearest = recording.find_nearest_waypoint_to_position(cell_center_x, cell_center_y)
+            if nearest:
+                print(f"Waypoint più vicino: {nearest['name']} a {nearest['distance']:.2f}m")
+        """
+        import math
+
+        waypoints = self.get_waypoint_details_list()
+        if not waypoints:
+            print("[NEAREST_WP] No waypoints available in graph")
+            return None
+
+        print(f"\n[NEAREST_WP] Ricerca waypoint più vicino a ({target_x:.3f}, {target_y:.3f})")
+
+        min_distance = float('inf')
+        nearest_waypoint = None
+
+        for wp in waypoints:
+            # Calcola distanza euclidea (ignorando Z per semplicità)
+            distance = math.sqrt((wp['x'] - target_x)**2 + (wp['y'] - target_y)**2)
+
+            print(f"  {wp['name']}: ({wp['x']:.3f}, {wp['y']:.3f}) - distanza: {distance:.3f}m")
+
+            if distance < min_distance:
+                min_distance = distance
+                nearest_waypoint = wp.copy()
+                nearest_waypoint['distance'] = distance
+
+        if nearest_waypoint:
+            print(f"[NEAREST_WP] ✓ Waypoint più vicino: {nearest_waypoint['name']} "
+                  f"a {nearest_waypoint['distance']:.3f}m")
+
+        return nearest_waypoint
+
     def navigate_to_waypoint(self, waypoint_id, timeout=1.0):
         """
         Navigate to a specific waypoint by ID.
@@ -328,6 +426,5 @@ class RecordingInterface(object):
             time.sleep(.5)  # Sleep for half a second to allow for command execution.
             is_finished = self._check_success(nav_to_cmd_id)
 
-        print(f'[OK] Arrived at waypoint {waypoint_id}')
-        return True
+        return is_finished
 
