@@ -177,6 +177,59 @@ class EnvironmentMap(object):
             return self.map[row][col] == 1
         return False
 
+    def is_point_in_cell(self, x, y, target_row, target_col):
+        """
+        Verifica se un punto in coordinate world è dentro una cella specifica.
+
+        Più preciso di world_to_grid_cell perché controlla i boundaries esatti della cella,
+        non solo il centro.
+
+        Args:
+            x: Coordinata X world
+            y: Coordinata Y world
+            target_row: Riga della cella target
+            target_col: Colonna della cella target
+
+        Returns:
+            bool: True se il punto (x, y) è dentro la cella target, False altrimenti
+
+        Example:
+            # Verifica se il robot è dentro la cella (2, 3)
+            x, y, z, _ = spotUtils.getPosition(robot_state_client)
+            if env.is_point_in_cell(x, y, 2, 3):
+                print("Robot è dentro la cella (2,3)")
+        """
+        # Calcola le coordinate del centro della cella target
+        cell_center = self.get_world_position_from_cell(target_row, target_col)
+        if cell_center is None:
+            return False
+
+        center_x, center_y = cell_center
+
+        # Calcola i boundaries della cella in coordinate world
+        half_size = self.cell_size / 2.0
+
+        # Trasforma il punto world in coordinate relative al centro della cella
+        delta_x = x - center_x
+        delta_y = y - center_y
+
+        # Ruota il delta per allinearlo alla griglia (rotazione inversa)
+        cos_yaw = np.cos(-self.origin_yaw)
+        sin_yaw = np.sin(-self.origin_yaw)
+
+        local_x = delta_x * cos_yaw - delta_y * sin_yaw
+        local_y = delta_x * sin_yaw + delta_y * cos_yaw
+
+        # Verifica se il punto è dentro i boundaries della cella
+        is_inside = (abs(local_x) <= half_size and abs(local_y) <= half_size)
+
+        if is_inside:
+            print(f"[CHECK] Point ({x:.2f},{y:.2f}) IS inside cell ({target_row},{target_col})")
+        else:
+            print(f"[CHECK] Point ({x:.2f},{y:.2f}) is OUTSIDE cell ({target_row},{target_col}) by ({local_x:.2f},{local_y:.2f})")
+
+        return is_inside
+
     def mark_cell_blocked(self, row, col):
         """
         Mark a cell as blocked (obstacle detected, cannot enter).
@@ -863,6 +916,9 @@ class EnvironmentMap(object):
         """
         Convert world coordinates to grid cell without marking as visited.
         Coordinates are rotated to align with the robot's initial orientation.
+
+        ⚠️ IMPORTANTE: Questo metodo assume che origin corrisponda al CENTRO della cella iniziale.
+        Usa round() invece di int() per arrotondare alla cella più vicina.
         """
         delta_x = x - self.origin_x
         delta_y = y - self.origin_y
@@ -874,8 +930,10 @@ class EnvironmentMap(object):
         grid_x = delta_x * cos_yaw - delta_y * sin_yaw
         grid_y = delta_x * sin_yaw + delta_y * cos_yaw
 
-        col = self.start_cell[1] + int(grid_x / self.cell_size)
-        row = self.start_cell[0] + int(grid_y / self.cell_size)
+        # CORRETTO: Usa round() per arrotondare al centro della cella più vicina
+        # Dividi per cell_size per ottenere l'offset in celle, poi arrotonda
+        col = self.start_cell[1] + round(grid_x / self.cell_size)
+        row = self.start_cell[0] + round(grid_y / self.cell_size)
 
         return (row, col)
 
@@ -1105,6 +1163,8 @@ class EnvironmentMap(object):
         if hasattr(self, 'current_cell'):
             print(f"Current cell: {self.current_cell}")
         print("-----------------------\n")
+
+
 
 
 
