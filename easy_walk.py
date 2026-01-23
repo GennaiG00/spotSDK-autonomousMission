@@ -92,7 +92,7 @@ def navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command
         return False, target_cell
 
     print(f"[OK] Reached waypoint {waypoint_id}")
-    time.sleep(1)
+    time.sleep(0.5)
 
     return True, target_cell
 
@@ -758,52 +758,57 @@ def easy_walk(options):
                         env=env
                     )
             else:
-                lowest_rank_cell_row, lowest_rank_cell_col, _ = env.get_lowest_rank_from_frontier_list(frontier, path)
+                lowest_rank_cell = env.get_lowest_rank_from_frontier_list(frontier, path)
                 #pos_cell = env.get_world_position_from_cell(lowest_rank_cell_row, lowest_rank_cell_col)
-                waypoint = recordingInterface.find_nearest_waypoint_to_position(lowest_rank_cell_row, lowest_rank_cell_col)
-                if waypoint is not None:
-                    recordingInterface.stop_recording()
-                    recordingInterface.download_full_graph()
-                    recordingInterface.get_recording_status()
-                    success = recordingInterface.navigate_to_waypoint(waypoint['id'])
-                    recordingInterface.start_recording()
-                    if success:
-                        x_nav, y_nav, _ = spotUtils.getPosition(robot_state_client)
-                        check = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client,
-                                                                 env, lowest_rank_cell_row, lowest_rank_cell_col)
-                        recordingInterface.create_default_waypoint()
-                        frontier.remove((lowest_rank_cell_row, lowest_rank_cell_col))
-                        if check:
-                            env.update_position(x, y)
-                            env.print_map()
-                            recordingInterface.get_recording_status()
+                if lowest_rank_cell is not None:
+                    waypoint = recordingInterface.find_nearest_waypoint_to_position(lowest_rank_cell[0], lowest_rank_cell[1])
+                    if waypoint is not None:
+                        recordingInterface.stop_recording()
+                        recordingInterface.download_full_graph()
+                        recordingInterface.get_recording_status()
+                        success = recordingInterface.navigate_to_waypoint(waypoint['id'], robot_state_client)
+                        recordingInterface.start_recording()
+                        if success:
+                            x_nav, y_nav, _ = spotUtils.getPosition(robot_state_client)
+                            check = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client,
+                                                                     env, lowest_rank_cell[0], lowest_rank_cell[1])
                             recordingInterface.create_default_waypoint()
-                            env.add_waypoint(x, y)
-                            #Add new border cells to frontier
-                            x_final, y_final, _, _ = spotUtils.getPosition(robot_state_client)
-                            robot_row, robot_col = env.get_cell_from_world(x_final, y_final)
-                            frontier.extend(find_new_borders(env, robot_row, robot_col, path, frontier))
-                            # PLOT: Dopo movimento riuscito alla cella lontana
-                            visualize_grid_with_candidates(
-                                pts=np.array([[x_final, y_final]]),
-                                cells_no_step=[],
-                                color=np.array([[255, 255, 255]]),
-                                robot_x=x_final,
-                                robot_y=y_final,
-                                candidates={'valid': [], 'rejected': []},
-                                chosen_point=None,
-                                iteration=f"{current_path_index}_far_success",
-                                env=env
-                            )
+                            frontier.remove((lowest_rank_cell[0], lowest_rank_cell[1]))
+                            print("Funziona 1")
+                            if check:
+                                print("Funziona 2")
+                                env.update_position(x, y)
+                                env.print_map()
+                                recordingInterface.get_recording_status()
+                                recordingInterface.create_default_waypoint()
+                                env.add_waypoint(x, y)
+                                print("Funziona 3")
+                                #Add new border cells to frontier
+                                x_final, y_final, _, _ = spotUtils.getPosition(robot_state_client)
+                                robot_row, robot_col = env.get_cell_from_world(x_final, y_final)
+                                frontier.extend(find_new_borders(env, robot_row, robot_col, path, frontier))
+                                # PLOT: Dopo movimento riuscito alla cella lontana
+                                print("Funziona 4")
+                                visualize_grid_with_candidates(
+                                    pts=np.array([[x_final, y_final]]),
+                                    cells_no_step=[],
+                                    color=np.array([[255, 255, 255]]),
+                                    robot_x=x_final,
+                                    robot_y=y_final,
+                                    candidates={'valid': [], 'rejected': []},
+                                    chosen_point=None,
+                                    iteration=f"{current_path_index}_far_success",
+                                    env=env
+                                )
+                            else:
+                                print(f"[ERROR] Could not enter cell {lowest_rank_cell[0], lowest_rank_cell[1]} after navigating to waypoint {waypoint['id']}")
+                                break
                         else:
-                            print(f"[ERROR] Could not enter cell {lowest_rank_cell_row, lowest_rank_cell_col} after navigating to waypoint {waypoint['id']}")
+                            print(f"[ERROR] Could not navigate to waypoint {waypoint['id']} near cell {lowest_rank_cell[0], lowest_rank_cell[1]}")
                             break
                     else:
-                        print(f"[ERROR] Could not navigate to waypoint {waypoint['id']} near cell {lowest_rank_cell_row, lowest_rank_cell_col}")
+                        print(f"[ERROR] No waypoint found near cell {lowest_rank_cell[0], lowest_rank_cell[1]}")
                         break
-                else:
-                    print(f"[ERROR] No waypoint found near cell {lowest_rank_cell_row, lowest_rank_cell_col}")
-                    break
 
             if len(frontier) == 0:
                 break
@@ -829,7 +834,7 @@ def easy_walk(options):
 
         # Stop recording and download the graph
         recordingInterface.stop_recording()
-        recordingInterface.navigate_to_first_waypoint()
+        recordingInterface.navigate_to_first_waypoint(robot_state_client)
         command_client.robot_command(RobotCommandBuilder.synchro_sit_command(), end_time_secs=time.time() + 20)
         sleep(1)
         robot.power_off(cut_immediately=False)

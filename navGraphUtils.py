@@ -1,3 +1,4 @@
+import math
 import os
 import time
 from bosdyn.api.graph_nav.graph_nav_pb2 import TravelParams
@@ -5,7 +6,8 @@ import bosdyn.client
 import bosdyn.client.lease
 import bosdyn.client.util
 import bosdyn.geometry
-from bosdyn.api.graph_nav import graph_nav_pb2, recording_pb2
+from bosdyn.api.graph_nav import graph_nav_pb2, recording_pb2, nav_pb2
+from bosdyn.client.frame_helpers import get_odom_tform_body
 from bosdyn.client.graph_nav import GraphNavClient, map_pb2
 from bosdyn.client.map_processing import MapProcessingServiceClient
 from bosdyn.client.recording import GraphNavRecordingServiceClient
@@ -27,6 +29,31 @@ class RecordingInterface(object):
         self._current_edge_snapshots = dict()
         self._current_annotation_name_to_wp_id = dict()
         self.robot = robot
+
+    def _set_initial_localization_waypoint(self, robot_state_client):
+        """Trigger localization to a waypoint."""
+
+        last_waypoint = self.get_last_waypoint()
+        last_waypoint_id = last_waypoint["id"]
+
+        if not last_waypoint_id:
+            # Failed to find the unique waypoint id.
+            return False
+
+        robot_state = robot_state_client.get_robot_state()
+        current_odom_tform_body = get_odom_tform_body(
+            robot_state.kinematic_state.transforms_snapshot).to_proto()
+        # Create an initial localization to the specified waypoint as the identity.
+        localization = nav_pb2.Localization()
+        localization.waypoint_id = last_waypoint_id
+        localization.waypoint_tform_body.rotation.w = 1.0
+        self._graph_nav_client.set_localization(
+            initial_guess_localization=localization,
+            # It's hard to get the pose perfect, search +/-20 deg and +/-20cm (0.2m).
+            max_distance=0.2,
+            max_yaw=20.0 * math.pi / 180.0,
+            fiducial_init=graph_nav_pb2.SetLocalizationRequest.FIDUCIAL_INIT_NO_FIDUCIAL,
+            ko_tform_body=current_odom_tform_body)
 
     def _get_transform(self, from_wp, to_wp):
         """Get transform from from-waypoint to to-waypoint."""
@@ -265,7 +292,7 @@ class RecordingInterface(object):
         else:
             return False
 
-    def navigate_to_first_waypoint(self):
+    def navigate_to_first_waypoint(self, robot_state_client=None):
         """Navigate back to the first waypoint (waypoint_0)."""
         graph = self._graph_nav_client.download_graph()
         first_waypoint = None
@@ -276,6 +303,7 @@ class RecordingInterface(object):
             print('No waypoint_0 found in the graph.')
             return False
 
+        self._set_initial_localization_waypoint(robot_state_client)
         print(f"[INFO] Navigating back to first waypoint (waypoint_0)...")
         nav_to_cmd_id = None
         is_finished = False
@@ -285,7 +313,7 @@ class RecordingInterface(object):
 
         while not is_finished:
             nav_to_cmd_id = self._graph_nav_client.navigate_to(first_waypoint.id, 1.0, command_id=nav_to_cmd_id)
-            time.sleep(.5)  # Sleep for half a second to allow for command execution.
+            time.sleep(1)
             is_finished = self._check_success(nav_to_cmd_id)
 
         print("[OK] Arrived at first waypoint")
@@ -348,6 +376,73 @@ class RecordingInterface(object):
 
         return waypoint_details
 
+    def get_last_waypoint(self):
+        """
+        Trova l'ultimo waypoint creato (quello con il numero più alto nel nome).
+
+        Analizza tutti i waypoint nel grafo e restituisce quello con il numero più alto
+        nel nome (es. waypoint_22 è l'ultimo se ci sono waypoint_0, waypoint_1, ..., waypoint_22).
+
+        Returns:
+            dict or None: Dizionario con dettagli dell'ultimo waypoint:
+                - 'id': Waypoint unique ID
+                - 'name': Waypoint name (e.g., 'waypoint_22')
+                - 'number': Numero del waypoint (es. 22)
+                - 'x': X position in world coordinates
+                - 'y': Y position in world coordinates
+                - 'z': Z position in world coordinates
+                - 'waypoint_obj': Full waypoint object
+                Oppure None se non ci sono waypoint nel grafo.
+
+        Example:
+            last_wp = recording.get_last_waypoint()
+            if last_wp:
+                print(f"Ultimo waypoint: {last_wp['name']} (#{last_wp['number']})")
+                print(f"Posizione: ({last_wp['x']:.2f}, {last_wp['y']:.2f})")
+        """
+        graph = self._graph_nav_client.download_graph()
+        if not graph or len(graph.waypoints) == 0:
+            print("[LAST_WP] No waypoints found in graph")
+            return None
+
+        last_waypoint = None
+        max_number = -1
+
+        for waypoint in graph.waypoints:
+            # Estrai il numero dal nome del waypoint (es. "waypoint_22" -> 22)
+            name = waypoint.annotations.name if waypoint.annotations.name else 'unnamed'
+
+            try:
+                # Prova a estrarre il numero dopo "waypoint_"
+                if name.startswith('waypoint_'):
+                    number = int(name.split('_')[-1])
+
+                    if number > max_number:
+                        max_number = number
+                        transform = waypoint.waypoint_tform_ko
+
+                        last_waypoint = {
+                            'id': waypoint.id,
+                            'name': name,
+                            'number': number,
+                            'x': transform.position.x,
+                            'y': transform.position.y,
+                            'z': transform.position.z,
+                            'waypoint_obj': waypoint
+                        }
+            except (ValueError, IndexError):
+                # Salta waypoint con nomi non standard
+                continue
+
+        if last_waypoint:
+            print(f"[LAST_WP] ✓ Ultimo waypoint: {last_waypoint['name']} (#{last_waypoint['number']})")
+            print(f"[LAST_WP] Posizione: ({last_waypoint['x']:.3f}, {last_waypoint['y']:.3f}, {last_waypoint['z']:.3f})")
+            print(f"[LAST_WP] ID: {last_waypoint['id']}")
+        else:
+            print(f"[LAST_WP] ⚠️ Nessun waypoint con formato standard 'waypoint_N' trovato")
+
+        return last_waypoint
+
     def find_nearest_waypoint_to_position(self, target_x, target_y):
         """
         Trova il waypoint più vicino a una posizione world (x, y) specificata.
@@ -401,7 +496,7 @@ class RecordingInterface(object):
 
         return nearest_waypoint
 
-    def navigate_to_waypoint(self, waypoint_id, timeout=1.0):
+    def navigate_to_waypoint(self, waypoint_id, robot_state_client=None):
         """
         Navigate to a specific waypoint by ID.
 
@@ -413,6 +508,7 @@ class RecordingInterface(object):
             bool: True if navigation succeeded, False otherwise
         """
         self._graph_nav_client.download_graph()
+        self._set_initial_localization_waypoint(robot_state_client)
 
         nav_to_cmd_id = None
         is_finished = False
@@ -423,7 +519,7 @@ class RecordingInterface(object):
 
         while not is_finished:
             nav_to_cmd_id = self._graph_nav_client.navigate_to(waypoint_id, 1.0, command_id=nav_to_cmd_id)
-            time.sleep(.5)  # Sleep for half a second to allow for command execution.
+            time.sleep(1)  # Sleep for half a second to allow for command execution.
             is_finished = self._check_success(nav_to_cmd_id)
 
         return is_finished

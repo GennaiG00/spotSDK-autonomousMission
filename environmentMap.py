@@ -935,7 +935,7 @@ class EnvironmentMap(object):
         col = self.start_cell[1] + round(grid_x / self.cell_size)
         row = self.start_cell[0] + round(grid_y / self.cell_size)
 
-        return (row, col)
+        return row, col
 
     def get_cell_status(self, row, col):
         """
@@ -1163,10 +1163,3 @@ class EnvironmentMap(object):
         if hasattr(self, 'current_cell'):
             print(f"Current cell: {self.current_cell}")
         print("-----------------------\n")
-
-
-
-
-
-
-
