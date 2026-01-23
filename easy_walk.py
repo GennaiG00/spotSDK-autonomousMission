@@ -92,7 +92,7 @@ def navigate_to_cell_via_waypoint(local_grid_client, robot_state_client, command
         return False, target_cell
 
     print(f"[OK] Reached waypoint {waypoint_id}")
-    time.sleep(0.5)
+    time.sleep(1)
 
     return True, target_cell
 
@@ -624,7 +624,7 @@ def attempt_enter_cell_from_position(local_grid_client, robot_state_client, comm
                                          command_client, robot_state_client)
 
 
-    time.sleep(0.2)
+    time.sleep(0.5)
 
     # Then move forward
     print(f"[INFO] Step 2: Moving forward {distance:.2f}m...")
@@ -633,7 +633,7 @@ def attempt_enter_cell_from_position(local_grid_client, robot_state_client, comm
 
     if success_move:
         # Wait for movement to complete
-        time.sleep(0.5)
+        time.sleep(1)
 
         # VERIFICA: Controlla se il robot è effettivamente nella cella target
         x_final, y_final, z_final, _ = spotUtils.getPosition(robot_state_client)
@@ -683,7 +683,7 @@ def easy_walk(options):
         recordingInterface.start_recording()
         recordingInterface.create_default_waypoint()
 
-        env = environmentMap.EnvironmentMap(rows=4, cols=4, cell_size=1)
+        env = environmentMap.EnvironmentMap(rows=3, cols=3, cell_size=1)
         x_boot, y_boot, z_boot, quat_boot = spotUtils.getPosition(robot_state_client)
 
         yaw_boot = np.arctan2(2.0 * (quat_boot.w * quat_boot.z + quat_boot.x * quat_boot.y),
@@ -714,22 +714,6 @@ def easy_walk(options):
             print(f"### PATH STEP: {current_path_index + 1}/{len(path)} ###")
             print(f"{'#'*70}\n")
 
-            print(recordingInterface.get_waypoint_list())
-
-
-            # PLOT: Stato iniziale dell'iterazione
-            visualize_grid_with_candidates(
-                pts=np.array([[x, y]]),
-                cells_no_step=[],
-                color=np.array([[255, 255, 255]]),
-                robot_x=x,
-                robot_y=y,
-                candidates={'valid': [], 'rejected': []},
-                chosen_point=None,
-                iteration=f"{current_path_index}_start",
-                env=env
-            )
-
             x, y, z, _ = spotUtils.getPosition(robot_state_client)
             robot_row, robot_col = env.get_cell_from_world(x, y)
 
@@ -758,12 +742,10 @@ def easy_walk(options):
                     recordingInterface.create_default_waypoint()
                     env.add_waypoint(x, y)
                     env.mark_cell_visited(selected_border[0], selected_border[1])
-                    #Add new border cells to frontier
                     x_new, y_new, _, _ = spotUtils.getPosition(robot_state_client)
                     robot_row, robot_col = env.get_cell_from_world(x_new, y_new)
                     frontier.extend(find_new_borders(env, robot_row, robot_col, path, frontier))
 
-                    # PLOT: Dopo movimento riuscito
                     visualize_grid_with_candidates(
                         pts=np.array([[x_new, y_new]]),
                         cells_no_step=[],
@@ -780,11 +762,16 @@ def easy_walk(options):
                 #pos_cell = env.get_world_position_from_cell(lowest_rank_cell_row, lowest_rank_cell_col)
                 waypoint = recordingInterface.find_nearest_waypoint_to_position(lowest_rank_cell_row, lowest_rank_cell_col)
                 if waypoint is not None:
+                    recordingInterface.stop_recording()
+                    recordingInterface.download_full_graph()
+                    recordingInterface.get_recording_status()
                     success = recordingInterface.navigate_to_waypoint(waypoint['id'])
+                    recordingInterface.start_recording()
                     if success:
                         x_nav, y_nav, _ = spotUtils.getPosition(robot_state_client)
                         check = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client,
                                                                  env, lowest_rank_cell_row, lowest_rank_cell_col)
+                        recordingInterface.create_default_waypoint()
                         frontier.remove((lowest_rank_cell_row, lowest_rank_cell_col))
                         if check:
                             env.update_position(x, y)
@@ -834,7 +821,6 @@ def easy_walk(options):
 
         # --- END OF SIMPLE MISSION ---
 
-        #recordingInterface.create_new_edge()
 
         robot.logger.info('Robot mission completed.')
         log_comment = 'Easy autowalk with obstacle avoidance.'
@@ -845,7 +831,7 @@ def easy_walk(options):
         recordingInterface.stop_recording()
         recordingInterface.navigate_to_first_waypoint()
         command_client.robot_command(RobotCommandBuilder.synchro_sit_command(), end_time_secs=time.time() + 20)
-        sleep(0.5)
+        sleep(1)
         robot.power_off(cut_immediately=False)
         recordingInterface.download_full_graph()
         estop.stop()
