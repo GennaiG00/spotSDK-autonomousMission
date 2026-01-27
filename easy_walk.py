@@ -21,7 +21,7 @@ import spotLogInUtils
 import environmentMap
 import spotUtils
 
-#TODO: check if the we can avoid to set a sleep after each movement command
+# TODO: check if we can avoid to set a sleep after each movement command
 
 def find_nearest_waypoint_to_cell(env, target_cell, recording_interface):
     """
@@ -633,7 +633,7 @@ def attempt_enter_cell_from_position(local_grid_client, robot_state_client, comm
 
     if success_move:
         # Wait for movement to complete
-        time.sleep(1)
+        time.sleep(0.5)
 
         # VERIFICA: Controlla se il robot è effettivamente nella cella target
         x_final, y_final, z_final, _ = spotUtils.getPosition(robot_state_client)
@@ -659,6 +659,52 @@ def find_new_borders(env, robot_row, robot_col, path, frontier):
                 new_borders_cells.append(new_border)
     return new_borders_cells
 
+def realign_robot_to_waypoint_orientation(self, waypoint_name):
+    """
+    Versione CORRETTA: Usa velocity_command per ruotare fisicamente il robot.
+    La versione precedente con 'stand' non funzionava per grandi angoli.
+    """
+    if waypoint_name not in self.waypoint_poses:
+        print(f"[REALIGN] ✗ Nessuna pose salvata per '{waypoint_name}'")
+        return False
+
+    target_yaw = self.waypoint_poses[waypoint_name]['yaw']
+
+    # Clienti necessari
+    command_client = self.robot.ensure_client(RobotCommandClient.default_service_name)
+    robot_state_client = self.robot.ensure_client('robot-state')
+
+    print(f"[REALIGN] Allineamento a {waypoint_name} (Target Yaw: {np.degrees(target_yaw):.1f}°)...")
+
+    # Loop di controllo rotazione (max 10 secondi)
+    for _ in range(20):
+        # Calcola Yaw attuale
+        x, y, z, quat = spotUtils.getPosition(robot_state_client)
+        current_yaw = np.arctan2(2.0 * (quat.w * quat.z + quat.x * quat.y), 1.0 - 2.0 * (quat.y ** 2 + quat.z ** 2))
+
+        # Calcola errore
+        delta_yaw = target_yaw - current_yaw
+        while delta_yaw > np.pi: delta_yaw -= 2 * np.pi
+        while delta_yaw < -np.pi: delta_yaw += 2 * np.pi
+
+        if abs(delta_yaw) < np.radians(2.0):  # Tolleranza 2 gradi
+            print("[REALIGN] ✓ Allineato.")
+            command_client.robot_command(RobotCommandBuilder.stop_command())
+            return True
+
+        # Ruota (Velocità proporzionale ma limitata)
+        rot_speed = np.clip(delta_yaw, -0.6, 0.6)
+        # Minima velocità per non stallare
+        if abs(rot_speed) < 0.2: rot_speed = 0.2 * np.sign(rot_speed)
+
+        cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0, v_y=0, v_rot=rot_speed)
+        command_client.robot_command(cmd)
+        time.sleep(0.5)
+
+    print("[REALIGN] ⚠️ Timeout rotazione.")
+    command_client.robot_command(RobotCommandBuilder.stop_command())
+    return False
+
 def easy_walk(options):
     robot, lease_client, robot_state_client, client_metadata = spotLogInUtils.setLogInfo(options)
 
@@ -680,10 +726,22 @@ def easy_walk(options):
         robot.logger.info('Robot powered on.')
         blocking_stand(command_client)
 
-        recordingInterface.start_recording()
-        recordingInterface.create_default_waypoint()
+        # Clear any existing map first
+        recordingInterface.clear_map()
 
-        env = environmentMap.EnvironmentMap(rows=3, cols=3, cell_size=1)
+        # Start recording BEFORE trying to initialize with fiducial
+        recordingInterface.start_recording()
+
+        # Try to initialize with fiducial (optional - if it fails, we can still create waypoints manually)
+        fiducial_success = recordingInterface.initialize_with_fiducial(robot_state_client, 549)
+        if not fiducial_success:
+            print("[WARNING] Fiducial initialization failed. Continuing without fiducial origin.")
+            print("[INFO] The map origin will be set when creating the first waypoint.")
+
+        # Create first waypoint in initial cell (0, 0)
+        recordingInterface.create_default_waypoint(cell_row=0, cell_col=0)
+
+        env = environmentMap.EnvironmentMap(rows=4, cols=4, cell_size=1)
         x_boot, y_boot, z_boot, quat_boot = spotUtils.getPosition(robot_state_client)
 
         yaw_boot = np.arctan2(2.0 * (quat_boot.w * quat_boot.z + quat_boot.x * quat_boot.y),
@@ -738,8 +796,8 @@ def easy_walk(options):
                 if check:
                     env.update_position(x, y)
                     env.print_map()
-                    recordingInterface.get_recording_status()
-                    recordingInterface.create_default_waypoint()
+                    # Create waypoint saving the cell we entered
+                    recordingInterface.create_default_waypoint(cell_row=selected_border[0], cell_col=selected_border[1])
                     env.add_waypoint(x, y)
                     env.mark_cell_visited(selected_border[0], selected_border[1])
                     x_new, y_new, _, _ = spotUtils.getPosition(robot_state_client)
@@ -759,36 +817,52 @@ def easy_walk(options):
                     )
             else:
                 lowest_rank_cell = env.get_lowest_rank_from_frontier_list(frontier, path)
-                #pos_cell = env.get_world_position_from_cell(lowest_rank_cell_row, lowest_rank_cell_col)
+
                 if lowest_rank_cell is not None:
-                    waypoint = recordingInterface.find_nearest_waypoint_to_position(lowest_rank_cell[0], lowest_rank_cell[1])
+                    target_row, target_col, rank = lowest_rank_cell
+
+                    print(f"\n[TARGET] Cella con rank più basso: ({target_row},{target_col}) rank={rank}")
+
+                    # NUOVO: Cerca waypoint più vicino usando distanza tra CELLE
+                    # invece che distanza euclidea tra coordinate
+                    waypoint = recordingInterface.find_nearest_waypoint_to_cell(target_row, target_col)
                     if waypoint is not None:
+                        # Stop registrazione prima di navigare
                         recordingInterface.stop_recording()
                         recordingInterface.download_full_graph()
-                        recordingInterface.get_recording_status()
+
+                        # Naviga al waypoint più vicino
                         success = recordingInterface.navigate_to_waypoint(waypoint['id'], robot_state_client)
-                        recordingInterface.start_recording()
+
                         if success:
-                            x_nav, y_nav, _ = spotUtils.getPosition(robot_state_client)
-                            check = attempt_enter_cell_from_position(local_grid_client, robot_state_client, command_client,
-                                                                     env, lowest_rank_cell[0], lowest_rank_cell[1])
-                            recordingInterface.create_default_waypoint()
-                            frontier.remove((lowest_rank_cell[0], lowest_rank_cell[1]))
-                            print("Funziona 1")
+                            recordingInterface.realign_robot_to_waypoint_orientation(waypoint['name'])
+                            recordingInterface.start_recording()
+
+                            # Prova a entrare nella cella target
+                            check = attempt_enter_cell_from_position(
+                                local_grid_client, robot_state_client, command_client,
+                                env, lowest_rank_cell[0], lowest_rank_cell[1]
+                            )
+
                             if check:
-                                print("Funziona 2")
-                                env.update_position(x, y)
-                                env.print_map()
-                                recordingInterface.get_recording_status()
-                                recordingInterface.create_default_waypoint()
-                                env.add_waypoint(x, y)
-                                print("Funziona 3")
-                                #Add new border cells to frontier
+                                # Success - create waypoint and update map
                                 x_final, y_final, _, _ = spotUtils.getPosition(robot_state_client)
+                                # Create waypoint saving the cell we entered
+                                recordingInterface.create_default_waypoint(cell_row=lowest_rank_cell[0], cell_col=lowest_rank_cell[1])
+                                env.add_waypoint(x_final, y_final)
+                                env.mark_as_visited(lowest_rank_cell[0], lowest_rank_cell[1])
+
+                                # Remove from frontier
+                                frontier.remove((lowest_rank_cell[0], lowest_rank_cell[1], lowest_rank_cell[2]))
+
+                                # Update robot position
                                 robot_row, robot_col = env.get_cell_from_world(x_final, y_final)
+
+                                # Find new borders
                                 frontier.extend(find_new_borders(env, robot_row, robot_col, path, frontier))
-                                # PLOT: Dopo movimento riuscito alla cella lontana
-                                print("Funziona 4")
+
+                                print(f"[SUCCESS] Entered cell ({lowest_rank_cell[0]},{lowest_rank_cell[1]}) via waypoint navigation")
+
                                 visualize_grid_with_candidates(
                                     pts=np.array([[x_final, y_final]]),
                                     cells_no_step=[],
@@ -801,31 +875,30 @@ def easy_walk(options):
                                     env=env
                                 )
                             else:
-                                print(f"[ERROR] Could not enter cell {lowest_rank_cell[0], lowest_rank_cell[1]} after navigating to waypoint {waypoint['id']}")
-                                break
+                                # Failure - remove from frontier anyway
+                                frontier.remove((lowest_rank_cell[0], lowest_rank_cell[1], lowest_rank_cell[2]))
+                                print(f"[ERROR] Could not enter cell {lowest_rank_cell[0], lowest_rank_cell[1]} after navigating to waypoint {waypoint['name']}")
                         else:
-                            print(f"[ERROR] Could not navigate to waypoint {waypoint['id']} near cell {lowest_rank_cell[0], lowest_rank_cell[1]}")
-                            break
+                            print(f"[ERROR] Could not navigate to waypoint {waypoint['name']} near cell {lowest_rank_cell[0], lowest_rank_cell[1]}")
                     else:
                         print(f"[ERROR] No waypoint found near cell {lowest_rank_cell[0], lowest_rank_cell[1]}")
-                        break
 
             if len(frontier) == 0:
                 break
-        # Print final exploration statistics
         print(f"\n{'='*70}")
         print(f"EXPLORATION COMPLETE")
         print(f"{'='*70}")
-        #print(f"Total cells in path: {len(path)}")
         print(f"Cells explored: {sum(sum(row) for row in env.map)}")
         env.print_map()
 
-        recordingInterface.create_default_waypoint()
+        # Create final waypoint (current robot position)
+        x_final, y_final, _, _ = spotUtils.getPosition(robot_state_client)
+        final_row, final_col = env.get_cell_from_world(x_final, y_final)
+        recordingInterface.create_default_waypoint(cell_row=final_row, cell_col=final_col)
         recordingInterface.get_recording_status()
         recordingInterface.create_new_edge()
 
         # --- END OF SIMPLE MISSION ---
-
 
         robot.logger.info('Robot mission completed.')
         log_comment = 'Easy autowalk with obstacle avoidance.'
@@ -834,6 +907,8 @@ def easy_walk(options):
 
         # Stop recording and download the graph
         recordingInterface.stop_recording()
+        x, y, z, _ = spotUtils.getPosition(robot_state_client)
+        recordingInterface.find_nearest_waypoint_to_position(x, y)
         recordingInterface.navigate_to_first_waypoint(robot_state_client)
         command_client.robot_command(RobotCommandBuilder.synchro_sit_command(), end_time_secs=time.time() + 20)
         sleep(1)
