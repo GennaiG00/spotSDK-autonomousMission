@@ -741,7 +741,7 @@ def easy_walk(options):
         # Create first waypoint in initial cell (0, 0)
         recordingInterface.create_default_waypoint(cell_row=0, cell_col=0)
 
-        env = environmentMap.EnvironmentMap(rows=4, cols=4, cell_size=1)
+        env = environmentMap.EnvironmentMap(rows=4, cols=15, cell_size=2)
         x_boot, y_boot, z_boot, quat_boot = spotUtils.getPosition(robot_state_client)
 
         yaw_boot = np.arctan2(2.0 * (quat_boot.w * quat_boot.z + quat_boot.x * quat_boot.y),
@@ -850,7 +850,6 @@ def easy_walk(options):
                                 # Create waypoint saving the cell we entered
                                 recordingInterface.create_default_waypoint(cell_row=lowest_rank_cell[0], cell_col=lowest_rank_cell[1])
                                 env.add_waypoint(x_final, y_final)
-                                env.mark_as_visited(lowest_rank_cell[0], lowest_rank_cell[1])
 
                                 # Remove from frontier
                                 frontier.remove((lowest_rank_cell[0], lowest_rank_cell[1], lowest_rank_cell[2]))
